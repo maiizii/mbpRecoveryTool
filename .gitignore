@@ -24,3 +24,12 @@ config.json
 *.pem
 *.key
 *.p12
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# sdk runtime logs
+sdk/**/__pycache__/
+sdk/**/log/
