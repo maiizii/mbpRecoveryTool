@@ -1,0 +1,26 @@
+node_modules/
+config.json
+.env
+.env.*
+*.log
+.DS_Store
+
+# local work dirs
+/tmp/
+/tmp/**
+/release/*.zip
+/release/*.mbp
+
+# runtime artifacts
+*.pid
+*.out
+*.err
+
+# OS / editor
+.vscode/
+.idea/
+
+# secrets / keys
+*.pem
+*.key
+*.p12

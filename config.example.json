@@ -1,0 +1,20 @@
+{
+  "boxBase": "http://YOUR_BOX_HOST:22211",
+  "sdkDir": "",
+  "recover": {
+    "boxWorkRoot": "/mmc/myt_recover_work",
+    "slot": "1",
+    "targetName": "example_container_name",
+    "userId": "7515749848698913838",
+    "baseline": "/mmc/path/to/fixed-baseline-userdata.img",
+    "mbp": "/mmc/myt_recover_work/7515749848698913838/7515749848698913838.working.mbp"
+  },
+  "targets": {
+    "example_container_name": {
+      "instanceApi": "http://YOUR_BOX_HOST:23121",
+      "rpaHost": "YOUR_BOX_HOST",
+      "rpaPort": 23122,
+      "adbPort": 23120
+    }
+  }
+}

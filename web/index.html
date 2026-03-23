@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MYT-TKYDS MBP恢复小工具</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>MYT 恢复工具</h1>
+        <div class="muted">v1 开发版</div>
+      </div>
+      <nav class="menu">
+        <button class="menu-btn active" data-page="machines">机位管理</button>
+        <button class="menu-btn" data-page="users">用户检索</button>
+        <button class="menu-btn" data-page="recover">恢复任务</button>
+        <button class="menu-btn" data-page="settings">参数设置</button>
+      </nav>
+      <div class="sidebar-foot muted">
+        当前先做纯 Web 版，服务端执行恢复。
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <div id="pageTitle" class="page-title">机位管理</div>
+          <div id="pageDesc" class="muted">查看机位、实例、运行状态并直接执行切换/启停。</div>
+        </div>
+        <div class="top-actions">
+          <button id="refreshSlots" class="secondary">刷新机位</button>
+        </div>
+      </header>
+
+      <section class="page active" data-page="machines">
+        <div class="panel">
+          <h2>机位总览</h2>
+          <div id="slots" class="slots"></div>
+        </div>
+      </section>
+
+      <section class="page" data-page="users">
+        <div class="panel">
+          <h2>用户检索</h2>
+          <div class="grid2">
+            <div class="full">
+              <label>输入目标 UID</label>
+              <div class="row">
+                <input id="recoverUserId" placeholder="例如 7515749848698913838" />
+                <button id="detectUser" class="warn">检索用户</button>
+              </div>
+              <div class="muted topgap">功能说明：输入 UID 后，系统自动定位 MBP、复制工作副本、拆包并提取基础资料；若失败则直接返回明确报错。</div>
+            </div>
+            <div class="full">
+              <label>检索结果</label>
+              <div id="userDetectSummary" class="summary muted">等待检索用户…</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="recover">
+        <div class="panel">
+          <h2>恢复任务</h2>
+          <div class="grid2">
+            <div>
+              <label>固定基座 baseline</label>
+              <input id="recoverBaseline" placeholder="例如 /mmc/.../userdata.img" />
+            </div>
+            <div>
+              <label>目标容器</label>
+              <input id="recoverTargetMirror" placeholder="随上方选择自动联动" disabled />
+            </div>
+          </div>
+          <div class="actions topgap">
+            <button id="saveRecoverConfig" class="secondary">保存恢复配置</button>
+            <button id="recoverPrecheck" class="secondary">恢复预检</button>
+            <button id="recoverPlan" class="warn">生成恢复计划</button>
+            <button id="recoverDryRun" class="danger">执行 Dry-Run</button>
+            <button id="recoverStart" class="danger">开始恢复</button>
+          </div>
+          <div class="muted topgap">当前阶段先把恢复任务页跑通：参数确认 → 预检 → 计划 → Dry-Run。</div>
+        </div>
+      </section>
+
+      <section class="page" data-page="settings">
+        <div class="panel">
+          <h2>参数设置</h2>
+          <div class="grid2">
+            <div class="full">
+              <label>盒子地址 boxBase</label>
+              <div class="row">
+                <input id="boxBase" placeholder="http://192.168.2.54:30201" />
+                <button id="saveConfig">保存配置</button>
+              </div>
+            </div>
+            <div class="full">
+              <label>当前配置状态</label>
+              <div id="configSummary" class="summary muted">等待读取配置…</div>
+            </div>
+            <div class="full">
+              <label>说明</label>
+              <div class="summary muted">当前 v1 先保留最小配置入口；后续再补服务器地址、可用基座、目标容器参数等设置项。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel result-panel">
+        <h2>执行结果</h2>
+        <div id="summary" class="summary">等待操作…</div>
+        <details open>
+          <summary>原始返回</summary>
+          <pre id="raw">暂无</pre>
+        </details>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

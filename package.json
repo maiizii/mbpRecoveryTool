@@ -1,0 +1,25 @@
+{
+  "name": "myt-recovery-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cli": "node src/index.js",
+    "gui": "node src/gui-server.js",
+    "probe": "node src/index.js probe",
+    "list": "node src/index.js list",
+    "slots": "node src/index.js slots",
+    "slot-status": "node src/index.js slot-status",
+    "slot-switch": "node src/index.js slot-switch",
+    "stage-status": "node src/index.js stage-status",
+    "start": "node src/index.js start",
+    "stop": "node src/index.js stop",
+    "restart": "node src/index.js restart",
+    "recover-plan": "node src/index.js recover-plan",
+    "precheck": "node src/index.js precheck",
+    "recover": "node src/index.js recover",
+    "smoke": "sh ./scripts/smoke.sh",
+    "recover-dryrun": "node src/index.js recover-dryrun",
+    "recover-run": "node src/index.js recover-run"
+  }
+}
