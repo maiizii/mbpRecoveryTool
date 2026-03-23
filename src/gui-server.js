@@ -16,6 +16,139 @@ const DEFAULT_SSH_HOST = 'mylo.gote.top';
 const DEFAULT_SSH_PORT = 23191;
 const DEFAULT_SSH_USER = 'root';
 const DEFAULT_SSH_KEY = '/root/.ssh/MYT1_ed25519';
+const JOBS_DIR = path.join(ROOT, 'tmp', 'recover-jobs');
+
+function ensureJobsDir() {
+  fs.mkdirSync(JOBS_DIR, { recursive: true });
+}
+
+function jobPaths(jobId) {
+  ensureJobsDir();
+  return {
+    state: path.join(JOBS_DIR, `${jobId}.json`),
+    log: path.join(JOBS_DIR, `${jobId}.log`),
+  };
+}
+
+function readJobState(jobId) {
+  const paths = jobPaths(jobId);
+  return readJson(paths.state, null);
+}
+
+function writeJobState(jobId, state) {
+  const paths = jobPaths(jobId);
+  fs.writeFileSync(paths.state, JSON.stringify(state, null, 2));
+}
+
+function appendJobLog(jobId, line) {
+  const paths = jobPaths(jobId);
+  fs.appendFileSync(paths.log, `${line}
+`);
+}
+
+function createRecoverJob(payload = {}) {
+  const jobId = `recover_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const state = {
+    jobId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: 'queued',
+    currentStage: null,
+    payload,
+    stages: [],
+    logs: [],
+  };
+  writeJobState(jobId, state);
+  appendJobLog(jobId, `[${new Date().toISOString()}] 任务已创建`);
+  return state;
+}
+
+function consumeRecoverEventLine(line = '') {
+  const marker = '@@RECOVER_EVENT@@';
+  const idx = line.indexOf(marker);
+  if (idx < 0) return null;
+  try {
+    return JSON.parse(line.slice(idx + marker.length));
+  } catch {
+    return null;
+  }
+}
+
+function updateJobFromEvent(jobId, event) {
+  const state = readJobState(jobId) || { jobId, createdAt: new Date().toISOString(), stages: [], logs: [], payload: {} };
+  state.updatedAt = new Date().toISOString();
+  if (event.type === 'job') {
+    state.status = event.status || state.status;
+    if (event.message) state.message = event.message;
+    if (event.blockers) state.blockers = event.blockers;
+    if (Array.isArray(event.plan) && event.plan.length) {
+      state.stages = event.plan.map((x) => ({
+        step: x.step,
+        key: x.key,
+        label: x.action || x.label || x.key,
+        status: event.status === 'blocked' ? (x.step === 1 ? 'failed' : 'pending') : 'pending',
+        detail: x.detail || '',
+      }));
+      state.currentStage = event.status === 'blocked' ? 1 : state.currentStage;
+    }
+    if (event.precheck) state.precheck = event.precheck;
+  }
+  if (event.type === 'stage') {
+    const step = event.stage?.step;
+    const key = event.stage?.key;
+    let row = state.stages.find((x) => x.step === step || (key && x.key === key));
+    if (!row) {
+      row = { step, key, label: event.stage?.action || event.stage?.label || key || `step-${step}` };
+      state.stages.push(row);
+      state.stages.sort((a, b) => (a.step || 0) - (b.step || 0));
+    }
+    row.status = event.status;
+    row.detail = event.result?.detail || event.error || event.stage?.detail || '';
+    if (event.status === 'running') row.startedAt = event.time || new Date().toISOString();
+    if (event.status === 'done' || event.status === 'failed') row.endedAt = event.time || new Date().toISOString();
+    state.currentStage = step || state.currentStage;
+    if (event.status === 'failed') state.status = 'failed';
+  }
+  if (event.type === 'log') {
+    const line = `[${event.time || new Date().toISOString()}] ${event.message || ''}`;
+    state.logs = state.logs || [];
+    state.logs.push(line);
+    state.logs = state.logs.slice(-200);
+    appendJobLog(jobId, line);
+  }
+  if (event.type === 'flow') {
+    const line = `[${event.time || new Date().toISOString()}] 流程跳转: ${event.fromStep} -> ${event.toStep} (${event.reason || ''})`;
+    state.logs = state.logs || [];
+    state.logs.push(line);
+    state.logs = state.logs.slice(-200);
+    appendJobLog(jobId, line);
+  }
+  writeJobState(jobId, state);
+  return state;
+}
+
+function spawnRecoverJob(jobId, args) {
+  const child = spawn(process.execPath, [path.join(ROOT, 'src', 'index.js'), ...args], { cwd: ROOT, env: process.env });
+  const onLine = (chunk) => {
+    const text = chunk.toString();
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const event = consumeRecoverEventLine(line);
+      if (event) updateJobFromEvent(jobId, event);
+      else appendJobLog(jobId, line);
+    }
+  };
+  child.stdout.on('data', onLine);
+  child.stderr.on('data', onLine);
+  child.on('close', (code) => {
+    const state = readJobState(jobId) || { jobId, stages: [], logs: [] };
+    state.updatedAt = new Date().toISOString();
+    if (state.status !== 'failed') state.status = code === 0 ? (state.status === 'done' ? 'done' : 'finished') : 'failed';
+    state.exitCode = code;
+    writeJobState(jobId, state);
+    appendJobLog(jobId, `[${new Date().toISOString()}] 任务结束 exitCode=${code}`);
+  });
+}
 
 function readJson(file, fallback = {}) {
   try {
@@ -1141,12 +1274,21 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
   return { status, message, detected, stages, diag: readOut.diag || {} };
 }
 
+function resolveRecoverMbp(cfg = {}, body = {}) {
+  if (body.mbp) return body.mbp;
+  const userId = String(body.userId || cfg?.recover?.userId || '').trim();
+  const users = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
+  const hit = users.find((x) => String(x?.userId || x?.uid || '') === userId) || null;
+  return hit?.workingMbp || hit?.sourceMbp || cfg?.recover?.detected?.workingMbp || cfg?.recover?.detected?.recoverMbp || cfg?.recover?.detected?.sourceMbp || '';
+}
+
 function buildRecoverArgs(configPath, mode, body = {}) {
+  const cfg = readJson(configPath, {});
   const args = [mode, `--config=${configPath}`];
-  const targetName = body.targetName || body.target || '';
-  const baseline = body.baseline || '';
-  const mbp = body.mbp || '';
-  const userId = body.userId || '';
+  const targetName = body.targetName || body.target || cfg?.recover?.targetName || '';
+  const baseline = body.baseline || cfg?.recover?.baseline || '';
+  const mbp = resolveRecoverMbp(cfg, body);
+  const userId = body.userId || cfg?.recover?.userId || '';
   if (targetName) args.push(`--target-name=${targetName}`);
   if (baseline) args.push(`--baseline=${baseline}`);
   if (mbp) args.push(`--mbp=${mbp}`);
@@ -1268,13 +1410,36 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
-        const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'recover-run', body)); // Use 'recover-run' for actual execution
-        send(res, out.ok ? 200 : 500, out);
+        const cfg = readJson(CONFIG_PATH, {});
+        const normalizedBody = { ...body, mbp: resolveRecoverMbp(cfg, body) };
+        const job = createRecoverJob(normalizedBody);
+        const state = readJobState(job.jobId) || job;
+        state.status = 'running';
+        writeJobState(job.jobId, state);
+        appendJobLog(job.jobId, `[${new Date().toISOString()}] 开始恢复任务`);
+        spawnRecoverJob(job.jobId, buildRecoverArgs(CONFIG_PATH, 'recover-run', normalizedBody));
+        send(res, 200, { ok: true, jobId: job.jobId, state: readJobState(job.jobId) });
       } catch (err) {
         send(res, 400, { ok: false, error: err.message });
       }
     });
     return;
+  }
+
+  if (req.method === 'GET' && u.pathname === '/api/recover/job') {
+    const jobId = String(u.searchParams.get('id') || '').trim();
+    if (!jobId) return send(res, 400, { ok: false, error: 'missing job id' });
+    const state = readJobState(jobId);
+    if (!state) return send(res, 404, { ok: false, error: 'job not found' });
+    return send(res, 200, { ok: true, job: state });
+  }
+
+  if (req.method === 'GET' && u.pathname === '/api/recover/log') {
+    const jobId = String(u.searchParams.get('id') || '').trim();
+    if (!jobId) return send(res, 400, { ok: false, error: 'missing job id' });
+    const paths = jobPaths(jobId);
+    if (!fs.existsSync(paths.log)) return send(res, 404, { ok: false, error: 'log not found' });
+    return send(res, 200, { ok: true, jobId, log: fs.readFileSync(paths.log, 'utf8') });
   }
 
   if (req.method === 'POST' && u.pathname === '/api/recover/dryrun') {

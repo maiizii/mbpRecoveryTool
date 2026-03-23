@@ -67,11 +67,23 @@
           <h2>恢复任务</h2>
           <div class="grid2">
             <div>
-              <label>固定基座 baseline</label>
-              <input id="recoverBaseline" placeholder="例如 /mmc/.../userdata.img" />
+              <label>选择用户</label>
+              <select id="recoverDetectedUser"></select>
             </div>
             <div>
-              <label>目标容器</label>
+              <label>选择机位</label>
+              <select id="recoverSlot"></select>
+            </div>
+            <div>
+              <label>选择容器</label>
+              <select id="recoverTargetName"></select>
+            </div>
+            <div>
+              <label>选择基座</label>
+              <select id="recoverBaseline"></select>
+            </div>
+            <div class="full">
+              <label>当前目标容器</label>
               <input id="recoverTargetMirror" placeholder="随上方选择自动联动" disabled />
             </div>
           </div>
@@ -82,7 +94,16 @@
             <button id="recoverDryRun" class="danger">执行 Dry-Run</button>
             <button id="recoverStart" class="danger">开始恢复</button>
           </div>
-          <div class="muted topgap">当前阶段先把恢复任务页跑通：参数确认 → 预检 → 计划 → Dry-Run。</div>
+          <div class="muted topgap">当前先把恢复前置选择项收好：用户 → 机位 → 容器 → 基座。</div>
+          <div class="panel topgap">
+            <h3>恢复执行状态</h3>
+            <div id="recoverJobSummary" class="summary muted">尚未启动恢复任务</div>
+            <div id="recoverStageList" class="summary muted topgap">暂无阶段信息</div>
+            <details open class="topgap">
+              <summary>滚动日志</summary>
+              <pre id="recoverJobLog">暂无日志</pre>
+            </details>
+          </div>
         </div>
       </section>
 
@@ -102,8 +123,12 @@
               <div id="configSummary" class="summary muted">等待读取配置…</div>
             </div>
             <div class="full">
+              <label>可用基座列表（每行一个）</label>
+              <textarea id="baselineOptions" rows="6" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
+            </div>
+            <div class="full">
               <label>说明</label>
-              <div class="summary muted">当前 v1 先保留最小配置入口；后续再补服务器地址、可用基座、目标容器参数等设置项。</div>
+              <div class="summary muted">当前 v1 先保留最小配置入口；本轮新增“可用基座列表”，恢复页将从这里读取基座选项。</div>
             </div>
           </div>
         </div>

@@ -237,6 +237,340 @@ function parseRpaStdout(stdout = '') {
   };
 }
 
+function runLocalCmd(bin, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd: options.cwd || process.cwd(), env: options.env || process.env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => stdout += d.toString());
+    child.stderr.on('data', (d) => stderr += d.toString());
+    child.on('close', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+    child.on('error', (err) => resolve({ ok: false, code: -1, stdout, stderr: err.message }));
+  });
+}
+
+function shellQuote(s = '') {
+  return `'${String(s).replace(/'/g, `"'"'`)}'`;
+}
+
+function pickSshRuntime(config = {}) {
+  const ssh = config?.ssh || {};
+  return {
+    enabled: ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1',
+    host: String(ssh.host || process.env.MYT_BOX_SSH_HOST || 'mylo.gote.top').trim(),
+    port: Number(ssh.port || process.env.MYT_BOX_SSH_PORT || 23191),
+    user: String(ssh.user || process.env.MYT_BOX_SSH_USER || 'root').trim(),
+    key: String(ssh.key || process.env.MYT_BOX_SSH_KEY || '/root/.ssh/MYT1_ed25519').trim(),
+  };
+}
+
+async function runSshCmd(config = {}, command = '') {
+  const ssh = pickSshRuntime(config);
+  if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
+  return runLocalCmd('ssh', [
+    '-i', ssh.key,
+    '-p', String(ssh.port),
+    '-o', 'BatchMode=yes',
+    '-o', 'PreferredAuthentications=publickey',
+    '-o', 'PasswordAuthentication=no',
+    '-o', 'KbdInteractiveAuthentication=no',
+    '-o', 'ConnectTimeout=8',
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    `${ssh.user}@${ssh.host}`,
+    command,
+  ]);
+}
+
+async function resolveUserdataImagePath(config = {}, targetName = '', log) {
+  const cmd = `find /mmc/data -maxdepth 2 -path ${shellQuote(`*${targetName}*/userdata.img`)} 2>/dev/null | head -n 1`;
+  const out = await runSshCmd(config, cmd);
+
+  log(`DEBUG[resolveUserdataImagePath]: targetName=${targetName}`);
+  log(`DEBUG[resolveUserdataImagePath]: cmd=${cmd}`);
+  log(`DEBUG[resolveUserdataImagePath]: runSshCmd ok=${out.ok}, code=${out.code}, stdout=${JSON.stringify(out.stdout)}, stderr=${JSON.stringify(out.stderr)}`);
+  const userdata = String(out.stdout || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || '';
+  return { ...out, userdata };
+}
+
+async function replaceBaselineOverSsh({ config = {}, targetName = '', baseline = '', log }) {
+  const resolved = await resolveUserdataImagePath(config, targetName, log);
+  if (!resolved.ok || !resolved.userdata) {
+    return { ok: false, error: `未找到目标 userdata.img: ${targetName}`, detail: resolved.stderr || resolved.stdout || resolved.error || '' };
+  }
+
+  const userdata = resolved.userdata;
+  log(`DEBUG[replaceBaselineOverSsh]: input targetName=${targetName}, baseline=${baseline}`);
+  log(`DEBUG[replaceBaselineOverSsh]: resolved.ok=${resolved.ok}, resolved.userdata=${JSON.stringify(resolved.userdata)}, resolved.stderr=${JSON.stringify(resolved.stderr)}`);
+  log(`DEBUG[replaceBaselineOverSsh]: userdata=${userdata}`);
+  const script = [
+    'set -eu',
+    `BASELINE=${shellQuote(baseline)}`,
+    `TARGET=${shellQuote(userdata)}`,
+    'if [ ! -f "' + '$' + 'BASELINE" ]; then echo BASELINE_MISSING; exit 11; fi',
+    'if [ ! -f "' + '$' + 'TARGET" ]; then echo TARGET_MISSING; exit 12; fi',
+    'B1=$(sha256sum "' + '$' + 'BASELINE" | cut -d" " -f1)',
+    'T1=$(sha256sum "' + '$' + 'TARGET" | cut -d" " -f1)',
+    'echo BEFORE_BASELINE_SHA=' + '$' + 'B1',
+    'echo BEFORE_TARGET_SHA=' + '$' + 'T1',
+    'if [ "' + '$' + 'B1" = "' + '$' + 'T1" ]; then echo ALREADY_MATCHED=1; exit 0; fi',
+    'cp -f "' + '$' + 'BASELINE" "' + '$' + 'TARGET"',
+    'sync',
+    'T2=$(sha256sum "' + '$' + 'TARGET" | cut -d" " -f1)',
+    'echo AFTER_TARGET_SHA=' + '$' + 'T2',
+    'if [ "' + '$' + 'B1" != "' + '$' + 'T2" ]; then echo COPY_VERIFY_FAILED=1; exit 13; fi',
+    'echo COPY_OK=1',
+  ].join('; ');
+  log(`DEBUG[replaceBaselineOverSsh]: script=${JSON.stringify(script)}`);
+  const out = await runSshCmd(config, script);
+  return { ...out, userdata };
+}
+
+async function scpToBox(config = {}, localFile = '', remoteFile = '') {
+  const ssh = pickSshRuntime(config);
+  if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
+  if (!localFile || !fs.existsSync(localFile)) return { ok: false, error: 'local file not found' };
+  return runLocalCmd('scp', [
+    '-i', ssh.key,
+    '-P', String(ssh.port),
+    '-o', 'BatchMode=yes',
+    '-o', 'PreferredAuthentications=publickey',
+    '-o', 'PasswordAuthentication=no',
+    '-o', 'KbdInteractiveAuthentication=no',
+    '-o', 'ConnectTimeout=8',
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    localFile,
+    `${ssh.user}@${ssh.host}:${remoteFile}`,
+  ]);
+}
+
+function ensureDir(dir = '') {
+  if (!dir) return;
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function resolveLocalUserLayerSource(userId = '') {
+  if (!userId) return '';
+  const base = path.resolve(process.cwd(), 'tmp', 'detect-user', String(userId), 'extract', 'data', 'data', 'com.zhiliaoapp.musically');
+  return fs.existsSync(base) ? base : '';
+}
+
+
+function resolveLocalCfgSource(userId = '') {
+  if (!userId) return '';
+  const devDir = path.resolve(process.cwd(), 'tmp', 'detect-user', String(userId), 'extract', 'dev');
+  if (!fs.existsSync(devDir)) return '';
+  const hit = fs.readdirSync(devDir, { withFileTypes: true }).find((d) => d.isDirectory() && d.name.startsWith('.cfg-'));
+  return hit ? path.join(devDir, hit.name) : '';
+}
+
+async function prepareRemoteDeviceFile({ config = {}, localFile = '', remoteFile = '', log }) {
+  if (!localFile || !fs.existsSync(localFile)) {
+    return { ok: false, error: `missing local file: ${localFile}` };
+  }
+  const remoteTmp = `/tmp/${path.basename(remoteFile)}`;
+  const pushed = await scpToBox(config, localFile, remoteTmp);
+  if (!pushed.ok) {
+    return { ok: false, step: 'upload-device-file', error: (pushed.stderr || pushed.stdout || pushed.error || 'scp failed').trim(), remoteTmp };
+  }
+  const cmd = [
+    'set -eu',
+    `mkdir -p ${shellQuote(path.posix.dirname(remoteFile))}`,
+    `cp -f ${shellQuote(remoteTmp)} ${shellQuote(remoteFile)}`,
+    'sync',
+    `sha256sum ${shellQuote(remoteFile)} | cut -d" " -f1`,
+  ].join('; ');
+  const applied = await runSshCmd(config, cmd);
+  if (!applied.ok) {
+    return { ok: false, step: 'apply-device-file', error: (applied.stderr || applied.stdout || applied.error || 'apply failed').trim(), remoteTmp };
+  }
+  const sha = String(applied.stdout || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || '';
+  return { ok: true, remoteTmp, remoteFile, sha };
+}
+
+async function injectDeviceFiles({ config = {}, targetName = '', userId = '', log }) {
+  const resolved = await resolveUserdataImagePath(config, targetName, log);
+  if (!resolved.ok || !resolved.userdata) {
+    return { ok: false, error: `未找到目标 userdata.img: ${targetName}` };
+  }
+  const targetRoot = path.posix.dirname(resolved.userdata);
+  const cfgSource = resolveLocalCfgSource(userId);
+  if (!cfgSource) {
+    return { ok: false, error: `未找到本地机参目录: userId=${userId}` };
+  }
+  const mapping = [
+    ['cfg.json', `${targetRoot}/cfg.json`],
+    ['baseCfg.json', `${targetRoot}/baseCfg.json`],
+    ['cfg.json', `${targetRoot}/modelData/cfg.json`],
+    ['telephone.json', `${targetRoot}/modelData/telephone.json`],
+    ['location.json', `${targetRoot}/modelData/location.json`],
+    ['device_info.json', `${targetRoot}/modelData/device_info.json`],
+    ['pif.json', `${targetRoot}/modelData/pif.json`],
+    ['baseCfg.json', `${targetRoot}/modelData/baseCfg.json`],
+  ];
+  const results = [];
+  for (const [name, remoteFile] of mapping) {
+    const localFile = path.join(cfgSource, name);
+    log(`机参逐个覆盖：${name} -> ${remoteFile}`);
+    const one = await prepareRemoteDeviceFile({ config, localFile, remoteFile, log });
+    if (!one.ok) return { ...one, targetRoot, cfgSource, results };
+    results.push({ name, remoteFile, sha: one.sha });
+    log(`机参校验完成：${name} sha=${one.sha || '-'}`);
+  }
+  return { ok: true, targetRoot, cfgSource, results };
+}
+
+function buildRecoverJobId(userId = '') {
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+  return `recover_${userId || 'unknown'}_${stamp}`;
+}
+
+async function uploadUserLayerEntry({ config = {}, relPath = '', localSourceBase = '', remoteSourceBase = '', jobLocalDir = '', log }) {
+  const localPath = path.join(localSourceBase, relPath);
+  if (!fs.existsSync(localPath)) {
+    return { ok: false, skipped: true, relPath, error: `missing local path: ${localPath}` };
+  }
+  ensureDir(jobLocalDir);
+  const safeName = relPath.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const archiveFile = path.join(jobLocalDir, `${safeName || 'entry'}_${Date.now()}.tgz`);
+  const pack = await runLocalCmd('tar', ['-czf', archiveFile, '-C', localSourceBase, relPath]);
+  if (!pack.ok) {
+    return { ok: false, relPath, step: 'pack', error: (pack.stderr || pack.stdout || 'tar pack failed').trim() };
+  }
+
+  const remoteArchive = `/tmp/${path.basename(archiveFile)}`;
+  const push = await scpToBox(config, archiveFile, remoteArchive);
+  if (!push.ok) {
+    return { ok: false, relPath, step: 'upload', error: (push.stderr || push.stdout || push.error || 'scp failed').trim() };
+  }
+
+  const remoteTarget = path.posix.join(remoteSourceBase, relPath);
+  const unpackCmd = [
+    'set -eu',
+    `mkdir -p ${shellQuote(path.posix.dirname(remoteTarget))}`,
+    `rm -rf ${shellQuote(remoteTarget)}`,
+    `cd ${shellQuote(remoteSourceBase)}`,
+    `tar -xzf ${shellQuote(remoteArchive)}`,
+    `test -e ${shellQuote(remoteTarget)}`,
+    `find ${shellQuote(remoteTarget)} -maxdepth 2 | sed -n '1,20p'`,
+  ].join('; ');
+  const unpack = await runSshCmd(config, unpackCmd);
+  if (!unpack.ok) {
+    return { ok: false, relPath, step: 'unpack', error: (unpack.stderr || unpack.stdout || unpack.error || 'remote unpack failed').trim() };
+  }
+
+  return {
+    ok: true,
+    relPath,
+    archiveFile,
+    remoteArchive,
+    remoteDir: remoteTarget,
+    detail: (unpack.stdout || '').trim(),
+  };
+}
+
+async function prepareRemoteUserLayer({ config = {}, userId = '', log }) {
+  const localSourceBase = resolveLocalUserLayerSource(userId);
+  if (!localSourceBase) {
+    return { ok: false, error: `未找到本地用户层目录: userId=${userId}` };
+  }
+
+  const jobId = buildRecoverJobId(userId);
+  const jobLocalDir = path.resolve(process.cwd(), 'tmp', 'recover-jobs', jobId, 'user-layer');
+  const remoteSourceBase = `/mmc/mbp_extract_${userId}_live/data/data/com.zhiliaoapp.musically`;
+  ensureDir(jobLocalDir);
+
+  const entries = [
+    'shared_prefs',
+    'files/keva',
+    'files/TTMachineCoreCache',
+    `files/${userId}`,
+    'files/ColdBootFilePrefs',
+    'databases',
+  ];
+  const uploaded = [];
+  for (const relPath of entries) {
+    log(`上传用户层条目：${relPath}`);
+    const one = await uploadUserLayerEntry({ config, relPath, localSourceBase, remoteSourceBase, jobLocalDir, log });
+    if (!one.ok) return { ...one, jobId, localSourceBase, remoteSourceBase, uploaded };
+    uploaded.push(one);
+    log(`上传完成：${relPath}`);
+  }
+
+  const verifyCmd = [
+    'set -eu',
+    `test -f ${shellQuote(path.posix.join(remoteSourceBase, 'shared_prefs', 'aweme_user.xml'))}`,
+    `test -f ${shellQuote(path.posix.join(remoteSourceBase, 'shared_prefs', 'ttnetCookieStore.xml'))}`,
+    `find ${shellQuote(path.posix.join(remoteSourceBase, 'files', 'keva', 'repo'))} -maxdepth 2 | sed -n '1,20p'`,
+  ].join('; ');
+  const verify = await runSshCmd(config, verifyCmd);
+  if (!verify.ok) {
+    return { ok: false, jobId, localSourceBase, remoteSourceBase, uploaded, step: 'verify', error: (verify.stderr || verify.stdout || verify.error || 'verify failed').trim() };
+  }
+
+  return { ok: true, jobId, localSourceBase, remoteSourceBase, uploaded, verify: (verify.stdout || '').trim() };
+}
+
+async function runRemoteScript(config = {}, remoteScript = '') {
+  if (!remoteScript) return { ok: false, error: 'missing remoteScript' };
+  return runSshCmd(config, `sh ${shellQuote(remoteScript)}`);
+}
+
+
+async function ensureRemoteRecoverScripts({ config = {}, log }) {
+  const localBase = path.resolve(process.cwd(), 'tmp', 'live-run');
+  const mapping = [
+    ['slot1_targeted_cleanup.sh', '/tmp/slot1_targeted_cleanup.sh'],
+    ['slot1_inject_user_layer.sh', '/tmp/slot1_inject_user_layer.sh'],
+    ['slot1_precise_postinject_scan.sh', '/tmp/slot1_precise_postinject_scan.sh'],
+  ];
+  for (const [name, remote] of mapping) {
+    const local = path.join(localBase, name);
+    if (!fs.existsSync(local)) {
+      return { ok: false, error: `脚本不存在: ${local}` };
+    }
+    log(`同步远端脚本：${name}`);
+    const pushed = await scpToBox(config, local, remote);
+    if (!pushed.ok) {
+      return { ok: false, step: 'upload-script', error: (pushed.stderr || pushed.stdout || pushed.error || `scp failed: ${name}`).trim() };
+    }
+  }
+  const chmodOut = await runSshCmd(config, 'chmod +x /tmp/slot1_targeted_cleanup.sh /tmp/slot1_inject_user_layer.sh /tmp/slot1_precise_postinject_scan.sh');
+  if (!chmodOut.ok) {
+    return { ok: false, step: 'chmod-script', error: (chmodOut.stderr || chmodOut.stdout || chmodOut.error || 'chmod failed').trim() };
+  }
+  return { ok: true, scripts: mapping.map((x) => x[1]) };
+}
+
+function parseRewriteCounts(stdout = '') {
+  const pick = (key) => {
+    const m = String(stdout).match(new RegExp(`${key}=(\d+)`));
+    return m ? Number(m[1]) : null;
+  };
+  return {
+    files: pick('files'),
+    old_uid: pick('old_uid'),
+    old_username: pick('old_username'),
+    old_name: pick('old_name'),
+  };
+}
+
+function parseScanCounts(stdout = '') {
+  const pick = (key) => {
+    const m = String(stdout).match(new RegExp(`${key}=(\d+)`));
+    return m ? Number(m[1]) : null;
+  };
+  return {
+    old_uid: pick('old_uid'),
+    old_username: pick('old_username'),
+    old_name: pick('old_name'),
+    new_uid: pick('new_uid'),
+    new_username: pick('new_username'),
+    new_name: pick('new_name'),
+  };
+}
+
 function printProbeSummary(report) {
   console.log('=== Probe Summary ===');
   console.log(`boxBase: ${report.boxBase}`);
@@ -284,16 +618,16 @@ function summarizeChecks(checks) {
 
 function buildRecoverPlan({ targetName, target, baseline, mbp, userId, overrides, dryRun }) {
   return [
-    { step: 1, action: '读取并确认目标实例', detail: `${targetName} / status=${target?.status || 'unknown'}`, dangerous: false },
-    { step: 2, action: '确认执行输入', detail: `baseline=${baseline} | mbp=${mbp} | userId=${userId}`, dangerous: false },
-    { step: 3, action: '确认外部连通配置', detail: `instanceApi=${overrides?.instanceApi || '-'} | rpa=${overrides?.rpaHost || '-'}:${overrides?.rpaPort || '-'}`, dangerous: false },
-    { step: 4, action: '停止目标实例（未来执行）', detail: '若实例为 running，恢复前必须先停机', dangerous: true },
-    { step: 5, action: '覆盖 baseline（未来执行）', detail: '将 baseline userdata 应用到目标实例', dangerous: true },
-    { step: 6, action: '注入机参层（未来执行）', detail: '按 MBP/提取层写入 machine parameter files', dangerous: true },
-    { step: 7, action: '注入用户层（未来执行）', detail: '执行用户层合并、旧身份清理、新身份注入', dangerous: true },
-    { step: 8, action: '执行精确重扫（未来执行）', detail: '确认旧 UID/用户名/昵称残留为 0', dangerous: false },
-    { step: 9, action: '配置网络层（未来执行）', detail: '检查/设置 VPC + S5', dangerous: true },
-    { step: 10, action: dryRun ? '仅输出计划，不执行写入' : '进入真实执行（尚未实现）', detail: dryRun ? 'dry-run 模式安全结束' : '当前版本未开放真实执行', dangerous: !dryRun },
+    { step: 1, key: 'precheck', action: '预检', detail: `${targetName} / status=${target?.status || 'unknown'} | baseline=${baseline} | mbp=${mbp} | userId=${userId}`, dangerous: false },
+    { step: 2, key: 'replace_baseline', action: '先停机再覆盖 baseline', detail: '先停机确认目标容器可写，再将基座彻底覆盖到指定容器，作为后续恢复底盘', dangerous: true },
+    { step: 3, key: 'inject_device', action: '注入机参层', detail: '按 MBP/提取层写入 machine parameter files', dangerous: true },
+    { step: 4, key: 'clean_old_identity', action: '清旧身份', detail: '旧 UID / username / name 第一轮清理与定点清理', dangerous: true },
+    { step: 5, key: 'inject_user_layer', action: '注入用户层', detail: '执行用户层合并覆盖与必要替换', dangerous: true },
+    { step: 6, key: 'precise_rescan', action: '精确复扫', detail: '若仍有残留，则回到第4步继续清理', dangerous: false },
+    { step: 7, key: 'network_vpc', action: '配置 VPC', detail: '绑定并回读确认 VPC', dangerous: true },
+    { step: 8, key: 'network_s5', action: '配置 S5', detail: '设置并回读确认 S5', dangerous: true },
+    { step: 9, key: 'start_container', action: '启动容器', detail: '完成恢复写入后重新启动目标容器', dangerous: true },
+    { step: 10, key: 'final_verify', action: '最终验证', detail: dryRun ? 'dry-run 模式只输出验证计划' : '输出本轮恢复结果与状态', dangerous: false },
   ];
 }
 
@@ -414,21 +748,29 @@ function printSlotStatus(report) {
   console.log('===================');
 }
 
+function resolveRecoverMbpFromConfig(config, userId, explicitMbp = '') {
+  if (explicitMbp) return explicitMbp;
+  const users = Array.isArray(config?.recover?.detectedUsers) ? config.recover.detectedUsers : [];
+  const hit = users.find((x) => String(x?.userId || x?.uid || '') === String(userId || '')) || null;
+  return hit?.workingMbp || hit?.sourceMbp || config?.recover?.detected?.workingMbp || config?.recover?.detected?.recoverMbp || config?.recover?.detected?.sourceMbp || '';
+}
+
 async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp, userId }) {
   const discovered = await discoverInstances(boxBase);
+  const resolvedMbp = resolveRecoverMbpFromConfig(config, userId, mbp);
   const report = {
     time: new Date().toISOString(),
     mode: 'recover-plan',
     boxBase,
     targetName,
     baseline: baseline || null,
-    mbp: mbp || null,
+    mbp: resolvedMbp || null,
     userId: userId || null,
     checks: [],
   };
 
   report.checks.push(filePathCheck('baseline', baseline));
-  report.checks.push(filePathCheck('mbp', mbp));
+  report.checks.push(resolvedMbp ? { item: 'mbp', ok: true, note: `已自动解析 ${resolvedMbp}` } : { item: 'mbp', ok: false, note: '未从 UID 检测结果解析到 MBP' });
   report.checks.push(userId ? { item: 'userId', ok: true, note: '已提供' } : { item: 'userId', ok: false, note: '缺少 --user-id' });
   report.discoveryOk = discovered.ok;
 
@@ -454,10 +796,10 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
   report.risks = [];
   if (report.target?.status === 'running') report.risks.push('目标实例当前为 running，后续真正恢复前必须先确认是否允许停机/覆盖');
   if (!report.overrides?.instanceApi || !report.overrides?.rpaHost || !report.overrides?.rpaPort) report.risks.push('当前实例缺少完整外部端口覆盖配置，后续自动化连通性可能不稳定');
-  if (!baseline || !mbp || !userId) report.risks.push('恢复核心参数未齐，不能进入执行阶段');
+  if (!baseline || !resolvedMbp || !userId) report.risks.push('恢复核心参数未齐，不能进入执行阶段');
 
   report.plan = [
-    '1. 校验目标实例、baseline、MBP、userId 参数是否齐全',
+    '1. 校验目标实例、baseline、UID，以及按 UID 自动解析出的 MBP 是否齐全',
     '2. 读取目标实例当前状态与端口覆盖配置',
     '3. 执行 baseline 覆盖前检查（状态、路径、授权）',
     '4. 执行机参层注入前检查',
@@ -662,6 +1004,7 @@ async function runRecoverPlan({ boxBase, targetName, config, baseline, mbp, user
 
 async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, dryRun = true }) {
   const pre = await buildPrecheckReport({ boxBase, targetName, config, baseline, mbp, userId });
+  mbp = pre.mbp || mbp;
   const report = {
     time: new Date().toISOString(),
     mode: 'recover',
@@ -674,9 +1017,7 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
     steps: [],
   };
 
-  if (!pre.summary.ok) report.blockers.push('precheck 未通过，不能进入恢复执行');
-  report.blockers.push(...(pre.risks || []));
-  report.plan = buildRecoverPlan({
+  const plan = buildRecoverPlan({
     targetName,
     target: pre.target,
     baseline,
@@ -685,39 +1026,188 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
     overrides: pre.overrides,
     dryRun,
   });
+  report.plan = plan;
+
+  const emit = (event) => console.log(`@@RECOVER_EVENT@@${JSON.stringify({ time: new Date().toISOString(), ...event })}`);
+  const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const setStage = async (stage, runner) => {
+    emit({ type: 'stage', status: 'running', stage });
+    try {
+      const result = await runner();
+      emit({ type: 'stage', status: 'done', stage, result });
+      report.steps.push({ step: stage.step, key: stage.key, ok: true, detail: result?.detail || stage.detail, result });
+      return { ok: true, result };
+    } catch (err) {
+      const error = String(err?.message || err || 'stage failed');
+      emit({ type: 'stage', status: 'failed', stage, error });
+      report.steps.push({ step: stage.step, key: stage.key, ok: false, detail: error });
+      throw err;
+    }
+  };
+  const log = (message, extra = {}) => emit({ type: 'log', level: 'info', message, ...extra });
+
+  if (!pre.summary.ok) report.blockers.push('precheck 未通过，不能进入恢复执行');
+  report.risks = [...(pre.risks || [])];
+
+  emit({ type: 'job', status: 'started', dryRun, targetName, userId, baseline, mbp });
 
   if (dryRun || report.blockers.length) {
     if (report.blockers.length) report.message = '前置检查未通过，当前仅返回计划';
+    emit({ type: 'job', status: 'blocked', blockers: report.blockers, risks: report.risks || [], precheck: pre.summary, plan });
     printRecoverPlanSummary(report);
     console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
     return;
   }
 
-  const pushStep = (step, ok, detail, extra = {}) => {
-    report.steps.push({ step: report.steps.length + 1, ok, detail, ...extra });
-  };
+  try {
+    await setStage(plan[0], async () => {
+      log('开始预检：校验目标、基座、用户、容器状态');
+      await sleepMs(150);
+      return { detail: `预检通过 ${pre.summary.okCount}/${pre.summary.total}` };
+    });
 
-  pushStep('确认目标实例', true, `${targetName || '-'} / ${pre.target?.status || 'unknown'}`);
+    await setStage(plan[1], async () => {
+      log('子任务 2.1：确认目标容器状态');
+      log(`子任务 2.2：准备停机 -> ${targetName}`);
+      if (pre.target?.status === 'running') {
+        log(`目标容器当前为 running，执行停机：${targetName}`);
+        const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
+        if (!stopResult.ok) throw new Error(stopResult.error || '停止目标实例失败');
+        log('子任务 2.3：停机完成，目标容器已进入可覆盖阶段');
+      } else {
+        log(`子任务 2.3：目标容器当前不是 running（${pre.target?.status || 'unknown'}），跳过停机`);
+      }
+      log('子任务 2.4：确认基座文件与目标镜像进入覆盖准备状态');
+      const copyOut = await replaceBaselineOverSsh({ config, targetName, baseline, log });
+      if (!copyOut.ok) {
+        throw new Error(`baseline 覆盖失败: ${(copyOut.stderr || copyOut.stdout || copyOut.error || copyOut.detail || 'ssh copy failed').trim()}`);
+      }
+      const copyLog = `${copyOut.stdout || ''}`.trim();
+      if (copyLog) log(`子任务 2.5：baseline 覆盖结果 -> ${copyLog.replace(/\s+/g, ' ').slice(0, 400)}`);
+      return { detail: `baseline 已真实覆盖到 ${copyOut.userdata}` };
+    });
 
-  const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
-  pushStep('停止目标实例', !!stopResult.ok, stopResult.ok ? '已发送 stop 请求' : (stopResult.error || 'stop failed'), { result: stopResult });
-  if (!stopResult.ok) {
-    report.message = '停止目标实例失败';
+    await setStage(plan[2], async () => {
+      log('开始注入机参层：逐个覆盖、逐个校验');
+      const injected = await injectDeviceFiles({ config, targetName, userId, log });
+      if (!injected.ok) {
+        throw new Error(`机参层注入失败: ${injected.error || injected.step || 'inject device failed'}`);
+      }
+      return { detail: `机参层逐个覆盖完成，共 ${injected.results.length} 个文件` };
+    });
+
+    const runCleanupStage = async (round = 1) => setStage(plan[3], async () => {
+      const oldUid = config?.recover?.baselineIdentity?.uid || '';
+      const oldUsername = config?.recover?.baselineIdentity?.username || '';
+      const oldName = config?.recover?.baselineIdentity?.name || '';
+      log(`子任务 4.${round}：加载基座旧身份 uid=${oldUid || '-'} username=${oldUsername || '-'} name=${oldName || '-'}`);
+      const synced = await ensureRemoteRecoverScripts({ config, log });
+      if (!synced.ok) {
+        throw new Error(`恢复脚本同步失败: ${synced.error || synced.step || 'sync failed'}`);
+      }
+      log(`子任务 4.${round}：执行清旧脚本`);
+      const cleanupOut = await runRemoteScript(config, '/tmp/slot1_targeted_cleanup.sh');
+      if (!cleanupOut.ok) {
+        throw new Error(`清旧脚本失败: ${(cleanupOut.stderr || cleanupOut.stdout || cleanupOut.error || 'cleanup failed').trim()}`);
+      }
+      const cleanupLog = `${cleanupOut.stdout || ''}`.trim();
+      const rewriteCounts = parseRewriteCounts(cleanupLog);
+      if (cleanupLog) log(`子任务 4.${round}：清旧结果 -> ${cleanupLog.replace(/\s+/g, ' ').slice(0, 400)}`);
+      if (rewriteCounts.files !== null) {
+        log(`子任务 4.${round}：替换计数 files=${rewriteCounts.files ?? '-'}, old_uid=${rewriteCounts.old_uid ?? '-'}, old_username=${rewriteCounts.old_username ?? '-'}, old_name=${rewriteCounts.old_name ?? '-'}`);
+      }
+      return { detail: `旧身份清理脚本已执行（第 ${round} 轮）`, rewriteCounts };
+    });
+
+    const runInjectUserLayerStage = async () => setStage(plan[4], async () => {
+      log('子任务 5.1：准备本地固定工作目录与远端用户层目录');
+      const prepared = await prepareRemoteUserLayer({ config, userId, log });
+      if (!prepared.ok) {
+        throw new Error(`用户层上传失败: ${prepared.error || prepared.detail || prepared.step || 'prepare failed'}`);
+      }
+      log(`子任务 5.2：用户层四段上传完成 -> jobId=${prepared.jobId}`);
+      if (prepared.verify) log(`子任务 5.3：关键文件校验通过 -> ${prepared.verify.replace(/\s+/g, ' ').slice(0, 400)}`);
+      const injectOut = await runRemoteScript(config, '/tmp/slot1_inject_user_layer.sh');
+      if (!injectOut.ok) {
+        throw new Error(`用户层注入脚本失败: ${(injectOut.stderr || injectOut.stdout || injectOut.error || 'inject failed').trim()}`);
+      }
+      const injectLog = `${injectOut.stdout || ''}`.trim();
+      if (injectLog) log(`子任务 5.4：注入结果 -> ${injectLog.replace(/\s+/g, ' ').slice(0, 400)}`);
+      return { detail: `用户层已按分目录稳定链路上传并注入：jobId=${prepared.jobId}` };
+    });
+
+    const runPreciseRescanStage = async (round = 1) => setStage(plan[5], async () => {
+      log(`子任务 6.${round}：执行全盘精确计数复扫`);
+      const scanOut = await runRemoteScript(config, '/tmp/slot1_precise_postinject_scan.sh');
+      if (!scanOut.ok) {
+        throw new Error(`精确复扫脚本失败: ${(scanOut.stderr || scanOut.stdout || scanOut.error || 'scan failed').trim()}`);
+      }
+      const counts = parseScanCounts(scanOut.stdout || '');
+      log(`子任务 6.${round}：复扫结果 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}, new_uid=${counts.new_uid ?? '-'}, new_username=${counts.new_username ?? '-'}, new_name=${counts.new_name ?? '-'}`);
+      const scanLog = `${scanOut.stdout || ''}`.trim();
+      if (scanLog) log(`子任务 6.${round}：复扫明细 -> ${scanLog.replace(/\s+/g, ' ').slice(0, 500)}`);
+      return {
+        detail: `复扫完成 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}`,
+        counts,
+      };
+    });
+
+    await runCleanupStage(1);
+    await runInjectUserLayerStage();
+    const maxCleanupRounds = Number(config?.recover?.maxCleanupRounds || 5);
+    let cleanupRound = 1;
+    while (true) {
+      const scanStage = await runPreciseRescanStage(cleanupRound);
+      const counts = scanStage?.result?.counts || {};
+      const oldUidLeft = Number(counts.old_uid || 0);
+      const oldUsernameLeft = Number(counts.old_username || 0);
+      const oldNameLeft = Number(counts.old_name || 0);
+      if (!oldUidLeft && !oldUsernameLeft && !oldNameLeft) {
+        log(`子任务 6.${cleanupRound}：旧身份三项已归零，进入网络层`);
+        break;
+      }
+      if (cleanupRound >= maxCleanupRounds) {
+        throw new Error(`精确复扫后仍有旧身份残留：old_uid=${oldUidLeft}, old_username=${oldUsernameLeft}, old_name=${oldNameLeft}；已达最大清理轮次 ${maxCleanupRounds}`);
+      }
+      emit({ type: 'flow', action: 'jump', fromStep: 6, toStep: 4, reason: `检测到旧身份残留，回到清旧身份（第 ${cleanupRound + 1} 轮）` });
+      log(`子任务 6.${cleanupRound}：检测到旧残留，回退到第4步继续清旧（下一轮=${cleanupRound + 1}）`);
+      cleanupRound += 1;
+      await runCleanupStage(cleanupRound);
+    }
+
+    await setStage(plan[6], async () => {
+      log('开始配置 VPC');
+      await sleepMs(180);
+      return { detail: 'VPC 配置占位已执行' };
+    });
+
+    await setStage(plan[7], async () => {
+      log('开始配置 S5');
+      await sleepMs(180);
+      return { detail: 'S5 配置占位已执行' };
+    });
+
+    await setStage(plan[8], async () => {
+      log(`开始启动容器：${targetName}`);
+      const startResult = await postJson(new URL('/android/start', boxBase).toString(), { name: targetName });
+      if (!startResult.ok) throw new Error(startResult.error || '启动目标实例失败');
+      return { detail: '容器启动请求已发送', result: startResult };
+    });
+
+    await setStage(plan[9], async () => {
+      log('开始最终验证');
+      await sleepMs(150);
+      return { detail: '最终验证占位已执行' };
+    });
+
+    report.message = '恢复任务阶段流已跑通（写入动作仍有占位步骤）';
+    emit({ type: 'job', status: 'done', message: report.message });
     console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
-    return;
+  } catch (err) {
+    report.message = String(err?.message || err || '恢复失败');
+    emit({ type: 'job', status: 'failed', message: report.message });
+    console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
   }
-
-  pushStep('覆盖 baseline', true, `待接 SSH/shell 执行：${baseline || '-'}`);
-  pushStep('注入机参层', true, `待接 SSH/shell 执行：${mbp || '-'}`);
-  pushStep('注入用户层', true, `待接 SSH/shell 执行：${userId || '-'}`);
-  pushStep('执行精确重扫', true, '待接 SSH/shell 执行');
-  pushStep('配置网络层', true, '待接 VPC + S5 接口');
-
-  const startResult = await postJson(new URL('/android/start', boxBase).toString(), { name: targetName });
-  pushStep('启动目标实例', !!startResult.ok, startResult.ok ? '已发送 start 请求' : (startResult.error || 'start failed'), { result: startResult });
-
-  report.message = startResult.ok ? '恢复主流程骨架已执行完成（写入步骤仍为占位）' : '启动目标实例失败';
-  console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
 }
 
 async function main() {

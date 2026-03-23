@@ -2,11 +2,13 @@ async function j(url, opts) { const r = await fetch(url, opts); return r.json();
 const $ = (id) => document.getElementById(id);
 
 let slotRows = [];
+let currentRecoverJobId = '';
+let recoverPollTimer = null;
 const pageMeta = {
   machines: { title: '机位管理', desc: '查看机位、实例、运行状态并直接执行切换/启停。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
-  recover: { title: '恢复任务', desc: '选择基座和目标容器，执行预检、计划和 Dry-Run。' },
-  settings: { title: '参数设置', desc: '配置盒子地址和后续恢复参数入口。' },
+  recover: { title: '恢复任务', desc: '先确定恢复前四个选择项：用户、机位、容器、基座。' },
+  settings: { title: '参数设置', desc: '配置盒子地址、基座列表等恢复前置参数。' },
 };
 
 function switchPage(page) {
@@ -23,6 +25,49 @@ function summarizeMessage(data) {
 function showResult(title, data) {
   $('summary').textContent = title + '\n\n' + summarizeMessage(data);
   $('raw').textContent = JSON.stringify(data, null, 2);
+}
+
+function renderRecoverJob(job = null, logText = '') {
+  if (!job) {
+    $('recoverJobSummary').textContent = '尚未启动恢复任务';
+    $('recoverStageList').textContent = '暂无阶段信息';
+    $('recoverJobLog').textContent = '暂无日志';
+    return;
+  }
+  $('recoverJobSummary').textContent = [
+    `jobId: ${job.jobId || '-'}`,
+    `状态: ${job.status || '-'}`,
+    `当前阶段: ${job.currentStage || '-'}`,
+    `目标容器: ${job.payload?.targetName || '-'}`,
+    `目标用户: ${job.payload?.userId || '-'}`,
+    `基座: ${job.payload?.baseline || '-'}`,
+    `MBP: ${job.payload?.mbp || job.payload?.resolvedMbp || job.mbp || '-'}`,
+  ].join('\n');
+  const stageLines = Array.isArray(job.stages) && job.stages.length
+    ? job.stages.map((x) => `${x.step || '-'} | ${x.label || x.key || '-'} | ${x.status || '-'} | ${x.detail || '-'}`)
+    : ['暂无阶段信息'];
+  $('recoverStageList').textContent = stageLines.join('\n');
+  $('recoverJobLog').textContent = logText || (Array.isArray(job.logs) ? job.logs.join('\n') : '暂无日志');
+}
+
+async function pollRecoverJob(jobId) {
+  if (!jobId) return;
+  currentRecoverJobId = jobId;
+  if (recoverPollTimer) clearTimeout(recoverPollTimer);
+  try {
+    const [jobOut, logOut] = await Promise.all([
+      j(`/api/recover/job?id=${encodeURIComponent(jobId)}`),
+      j(`/api/recover/log?id=${encodeURIComponent(jobId)}`),
+    ]);
+    const job = jobOut?.job || null;
+    const logText = logOut?.log || '';
+    renderRecoverJob(job, logText);
+    if (job && !['done', 'failed', 'finished'].includes(job.status)) {
+      recoverPollTimer = setTimeout(() => pollRecoverJob(jobId), 1000);
+    }
+  } catch (err) {
+    $('recoverJobLog').textContent = `日志轮询失败: ${err?.message || err}`;
+  }
 }
 
 function slotCard(row) {
@@ -62,13 +107,70 @@ function normalizeSlots(out) {
 }
 
 function setSelectOptions(selectEl, options, preferredValue = '') {
+  if (!selectEl) return;
   const html = options.map((opt) => `<option value="${opt.value}">${opt.label}</option>`).join('');
   selectEl.innerHTML = html || '<option value="">暂无可选项</option>';
-  if (preferredValue && options.some(x => x.value === preferredValue)) selectEl.value = preferredValue;
+  if (preferredValue && options.some(x => String(x.value) === String(preferredValue))) {
+    selectEl.value = preferredValue;
+  }
+}
+
+function getDetectedUsers(cfg = {}) {
+  const list = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
+  return list.filter(x => x && (x.userId || x.uid || x.username));
+}
+
+function getBaselineOptions(cfg = {}) {
+  const list = Array.isArray(cfg?.recover?.baselineOptions) ? cfg.recover.baselineOptions : [];
+  return list.map(x => String(x || '').trim()).filter(Boolean);
+}
+
+function upsertDetectedUser(cfg = {}, info = {}) {
+  const list = getDetectedUsers(cfg);
+  const key = String(info.userId || info.uid || '').trim();
+  if (!key) return list;
+  const next = list.filter(x => String(x.userId || x.uid || '').trim() !== key);
+  next.unshift({
+    userId: info.userId || key,
+    uid: info.uid || '',
+    username: info.username || '',
+    nickname: info.nickname || '',
+    name: info.name || '',
+    model: info.model || '',
+    proxyIp: info.proxyIp || '',
+    sourceMbp: info.sourceMbp || '',
+    workingMbp: info.workingMbp || '',
+    extractRoot: info.extractRoot || '',
+    detectedAt: new Date().toISOString(),
+  });
+  return next.slice(0, 50);
+}
+
+function fillDetectedUserSelectors(cfg = {}) {
+  const users = getDetectedUsers(cfg);
+  const preferred = cfg?.recover?.userId || '';
+  setSelectOptions(
+    $('recoverDetectedUser'),
+    users.map((x) => ({
+      value: x.userId || x.uid,
+      label: `${x.userId || x.uid} | ${x.username || '-'} | ${x.nickname || '-'} | ${x.model || '-'} | ${x.proxyIp || '-'}`,
+    })),
+    preferred,
+  );
+}
+
+function fillBaselineSelectors(cfg = {}) {
+  const baselines = getBaselineOptions(cfg);
+  setSelectOptions(
+    $('recoverBaseline'),
+    baselines.map((x) => ({ value: x, label: x })),
+    cfg?.recover?.baseline || '',
+  );
+  $('baselineOptions').value = baselines.join('\n');
 }
 
 function refreshTargetOptions(preferredTarget = '') {
-  const slot = $('recoverSlot').value;
+  const slot = $('recoverSlot')?.value;
   const row = slotRows.find(x => String(x.slot) === String(slot));
   const items = row ? row.all || [] : [];
   setSelectOptions(
@@ -91,15 +193,18 @@ function fillSlotSelectors(preferredSlot = '', preferredTarget = '') {
 async function loadConfig() {
   const cfg = await j('/api/config');
   $('boxBase').value = cfg.boxBase || '';
-  $('recoverBaseline').value = cfg.recover?.baseline || '';
-  $('recoverMbp').value = cfg.recover?.mbp || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
+  fillDetectedUserSelectors(cfg);
+  fillBaselineSelectors(cfg);
   $('configSummary').textContent = [
     `boxBase: ${cfg.boxBase || '-'}`,
     `默认目标容器: ${cfg.recover?.targetName || '-'}`,
     `默认机位: ${cfg.recover?.slot || '-'}`,
+    `默认基座: ${cfg.recover?.baseline || '-'}`,
+    `成功检索用户数: ${getDetectedUsers(cfg).length}`,
+    `可用基座数: ${getBaselineOptions(cfg).length}`,
     `SSH: ${cfg.ssh?.enabled ? '开启' : '关闭'}`,
   ].join('\n');
   return cfg;
@@ -108,7 +213,13 @@ async function loadConfig() {
 async function saveConfig() {
   const cfg = await j('/api/config');
   cfg.boxBase = $('boxBase').value.trim();
+  cfg.recover = cfg.recover || {};
+  cfg.recover.baselineOptions = $('baselineOptions').value
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
   const out = await j('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cfg) });
+  await loadConfig();
   showResult('配置已保存', out);
 }
 
@@ -116,8 +227,8 @@ function getRecoverPayload() {
   return {
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
-    userId: $('recoverUserId').value.trim(),
-    baseline: $('recoverBaseline').value.trim(),
+    userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
+    baseline: $('recoverBaseline')?.value?.trim?.() || '',
     mbp: '',
   };
 }
@@ -135,6 +246,7 @@ async function saveRecoverConfig(extra = {}, opts = {}) {
     body: JSON.stringify(cfg),
   });
   if (!opts.silent) showResult('恢复配置已保存', out);
+  await loadConfig();
   return out;
 }
 
@@ -172,6 +284,7 @@ async function detectUser() {
     });
     const info = out?.parsed?.detected || out?.detected || null;
     const status = out?.parsed?.status || '';
+    const cfg = await j('/api/config');
 
     if (!out.ok) {
       const msg = out?.parsed?.message || out?.error || '检索失败';
@@ -202,8 +315,18 @@ async function detectUser() {
         `GMS机型: ${info.gmsModel || '-'} / ${info.gmsBrand || '-'}`,
         `源MBP: ${info.sourceMbp || '-'}`,
       ];
+      cfg.recover = cfg.recover || {};
+      cfg.recover.userId = info.userId || payload.userId;
+      cfg.recover.detectedSummary = lines.join('\n');
+      cfg.recover.detected = info;
+      cfg.recover.detectedUsers = upsertDetectedUser(cfg, info);
+      await j('/api/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
       $('userDetectSummary').textContent = lines.join('\n');
-      await saveRecoverConfig({ userId: info.userId || payload.userId, detectedSummary: lines.join('\n'), detected: info }, { silent: true });
+      await loadConfig();
     }
     showResult('用户检索完成', out);
   } catch (err) {
@@ -218,8 +341,20 @@ async function detectUser() {
 
 async function callRecoverApi(action) {
   const payload = getRecoverPayload();
+  if (!payload.userId) {
+    showResult('恢复任务', { error: '请先选择用户' });
+    return;
+  }
+  if (!payload.slot) {
+    showResult('恢复任务', { error: '请先选择机位' });
+    return;
+  }
   if (!payload.targetName) {
-    showResult('恢复任务', { error: '请先选择目标容器 targetName' });
+    showResult('恢复任务', { error: '请先选择目标容器' });
+    return;
+  }
+  if (!payload.baseline) {
+    showResult('恢复任务', { error: '请先选择基座 baseline' });
     return;
   }
   const out = await j(`/api/recover/${action}`, {
@@ -229,6 +364,10 @@ async function callRecoverApi(action) {
   });
   const textMap = { precheck: '恢复预检完成', plan: '恢复计划生成完成', dryrun: 'Dry-Run 恢复完成', start: '开始恢复任务' };
   showResult(textMap[action] || '恢复任务完成', out);
+  if (action === 'start' && out?.jobId) {
+    renderRecoverJob(out.state || { jobId: out.jobId, status: 'running', payload }, '任务已启动，等待日志...');
+    pollRecoverJob(out.jobId);
+  }
 }
 
 async function doAction(mode, targetName, slot, dryRun) {
@@ -266,6 +405,7 @@ $('recoverDryRun').onclick = () => callRecoverApi('dryrun');
 $('recoverStart').onclick = () => callRecoverApi('start');
 $('recoverSlot').onchange = () => refreshTargetOptions();
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; };
+$('recoverDetectedUser').onchange = () => saveRecoverConfig({}, { silent: true });
+$('recoverBaseline').onchange = () => saveRecoverConfig({}, { silent: true });
 
-loadConfig().then(refreshSlots);
 loadConfig().then(refreshSlots);

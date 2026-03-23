@@ -7,7 +7,16 @@
     "targetName": "example_container_name",
     "userId": "7515749848698913838",
     "baseline": "/mmc/path/to/fixed-baseline-userdata.img",
-    "mbp": "/mmc/myt_recover_work/7515749848698913838/7515749848698913838.working.mbp"
+    "baselineOptions": [
+      "/mmc/path/to/fixed-baseline-userdata.img"
+    ],
+    "baselineIdentity": {
+      "uid": "7612137043586974733",
+      "username": "vnhmaiuyn6663",
+      "name": "Behind Scenes"
+    },
+    "mbp": "/mmc/myt_recover_work/7515749848698913838/7515749848698913838.working.mbp",
+    "detectedUsers": []
   },
   "targets": {
     "example_container_name": {
