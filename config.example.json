@@ -16,6 +16,7 @@
       "name": "Behind Scenes"
     },
     "mbp": "/mmc/myt_recover_work/7515749848698913838/7515749848698913838.working.mbp",
+    "proxyMappingFile": "./data/proxy-mapping.xlsx",
     "detectedUsers": []
   },
   "targets": {

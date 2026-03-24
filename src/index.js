@@ -109,6 +109,11 @@ function loadJsonIfExists(file) {
   }
 }
 
+function safeReadJson(file, fallback = null) {
+  const data = loadJsonIfExists(file);
+  return data == null ? fallback : data;
+}
+
 function getConfig(configPath) {
   return loadJsonIfExists(configPath) || {};
 }
@@ -129,6 +134,12 @@ function withPort(base, port) {
   u.search = '';
   u.hash = '';
   return u.toString().replace(/\/$/, '');
+}
+
+function resolveInstanceApiFromTarget(target, boxBase) {
+  if (target?.ip) return `http://${target.ip}:9082`;
+  if (target?.api) return withPort(boxBase, target.api);
+  return null;
 }
 
 function resolveEndpointOverrides(config, targetName) {
@@ -237,6 +248,65 @@ function parseRpaStdout(stdout = '') {
   };
 }
 
+function sleep(ms = 1000) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForContainerStatus({ boxBase, targetName, want = 'running', timeoutMs = 60000, intervalMs = 2000 }) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    const discovered = await discoverInstances(boxBase);
+    if (discovered.ok) {
+      const target = discovered.list.find((x) => x.name === targetName) || null;
+      last = target;
+      if (target?.status === want) return { ok: true, target };
+    }
+    await sleep(intervalMs);
+  }
+  return { ok: false, target: last, error: `timeout waiting for container status=${want}` };
+}
+
+async function waitForInstanceProxyReady({ instanceApi, timeoutMs = 60000, intervalMs = 3000 }) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    const row = await requestJson(new URL('/proxy', instanceApi).toString(), { timeout: 5000 });
+    last = row;
+    if (row?.ok) return { ok: true, result: row };
+    await sleep(intervalMs);
+  }
+  return { ok: false, result: last, error: `timeout waiting for instance /proxy` };
+}
+
+
+async function waitForInstanceProxyReadyViaBox({ config, instanceApi, timeoutMs = 60000, intervalMs = 3000 }) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    const target = `${String(instanceApi || '').replace(/\/$/, '')}/proxy`;
+    const script = [
+      'URL=' + shellQuote(target),
+      "TMP=/tmp/oc_proxy_$$.json",
+      "STATUS=$(curl -sS --max-time 5 -o \"$TMP\" -w '%{http_code}' \"$URL\" 2>/dev/null || true)",
+      "BODY=$(cat \"$TMP\" 2>/dev/null || true)",
+      "rm -f \"$TMP\" >/dev/null 2>&1 || true",
+      'printf "HTTP_STATUS=%s\n" "$STATUS"',
+      'printf "BODY=%s\n" "$BODY"',
+    ].join('; ');
+    const out = await runSshCmd(config, script);
+    const stdout = String(out.stdout || '');
+    const status = (stdout.match(/HTTP_STATUS=(\d+)/) || [])[1] || '';
+    const body = (stdout.match(/BODY=([\s\S]*)/) || [])[1] || '';
+    let json = null;
+    try { json = JSON.parse(body); } catch {}
+    last = { ok: out.ok && status.startsWith('2'), status: Number(status || 0), body, json, stdout, stderr: out.stderr || '' };
+    if (last.ok) return { ok: true, result: last };
+    await sleep(intervalMs);
+  }
+  return { ok: false, result: last, error: 'timeout waiting for instance /proxy via box ssh' };
+}
+
 function runLocalCmd(bin, args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { cwd: options.cwd || process.cwd(), env: options.env || process.env });
@@ -251,6 +321,77 @@ function runLocalCmd(bin, args, options = {}) {
 
 function shellQuote(s = '') {
   return `'${String(s).replace(/'/g, `"'"'`)}'`;
+}
+
+function resolveProxyMappingPath(config = {}) {
+  return String(config?.recover?.proxyMappingFile || path.join(process.cwd(), 'data', 'proxy-mapping.xlsx'));
+}
+
+async function lookupProxyMappingByIp({ config = {}, ip = '' }) {
+  const mappingFile = resolveProxyMappingPath(config);
+  if (!ip) return { ok: false, error: 'missing proxy ip', mappingFile };
+  if (!fs.existsSync(mappingFile)) return { ok: false, error: `proxy mapping file not found: ${mappingFile}`, mappingFile };
+  const py = [
+    'import json, sys',
+    'from openpyxl import load_workbook',
+    'file_path = sys.argv[1]',
+    'target_ip = str(sys.argv[2]).strip()',
+    'wb = load_workbook(file_path, read_only=True, data_only=True)',
+    'ws = wb[wb.sheetnames[0]]',
+    'headers = [str(v).strip() if v is not None else "" for v in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]',
+    'rows = []',
+    'for row in ws.iter_rows(min_row=2, values_only=True):',
+    '    item = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}',
+    '    if str(item.get("IP", "")).strip() == target_ip:',
+    '        rows.append(item)',
+    'payload = rows[0] if rows else None',
+    'print(json.dumps(payload, ensure_ascii=False, default=str))',
+  ].join('\n');
+  const out = await runLocalCmd('python3', ['-c', py, mappingFile, String(ip)]);
+  if (!out.ok) return { ok: false, error: (out.stderr || out.stdout || 'proxy lookup failed').trim(), mappingFile };
+  const raw = String(out.stdout || '').trim();
+  let row = null;
+  try { row = raw ? JSON.parse(raw) : null; } catch (err) {
+    return { ok: false, error: `proxy lookup parse failed: ${err.message}`, mappingFile, raw };
+  }
+  if (!row) return { ok: false, error: `proxy mapping not found for ip=${ip}`, mappingFile, proxyIp: ip };
+  const result = {
+    id: row.ID || null,
+    type: String(row.类型 ?? row.type ?? 2),
+    ip: String(row.IP ?? '').trim(),
+    port: String(row.端口 ?? '').trim(),
+    user: String(row.用户名 ?? '').trim(),
+    password: String(row.密码 ?? '').trim(),
+    status: row.状态,
+    remark: row.备注 || '',
+    raw: row,
+    mappingFile,
+  };
+  if (!result.ip || !result.port) return { ok: false, error: `proxy mapping row incomplete for ip=${ip}`, mappingFile, row: result };
+  return { ok: true, proxy: result };
+}
+
+async function callInstanceProxyCmdViaBox({ config = {}, instanceApi = '', query = '', method = 'GET', body = '' }) {
+  const target = `${String(instanceApi || '').replace(/\/$/, '')}/proxy${query ? `?${query}` : ''}`;
+  const parts = [
+    'set -eu',
+    `URL=${shellQuote(target)}`,
+    `METHOD=${shellQuote(method)}`,
+    `BODY=${shellQuote(body)}`,
+    'TMP=/tmp/oc_proxy_call_$$.out',
+    'if [ "$METHOD" = "POST" ]; then STATUS=$(curl -sS --max-time 12 -X POST -o "$TMP" -w "%{http_code}" --data "$BODY" "$URL" 2>/dev/null || true); else STATUS=$(curl -sS --max-time 12 -o "$TMP" -w "%{http_code}" "$URL" 2>/dev/null || true); fi',
+    'BODY_TEXT=$(cat "$TMP" 2>/dev/null || true)',
+    'rm -f "$TMP" >/dev/null 2>&1 || true',
+    'printf "HTTP_STATUS=%s\n" "$STATUS"',
+    'printf "BODY=%s\n" "$BODY_TEXT"',
+  ];
+  const out = await runSshCmd(config, parts.join('; '));
+  const stdout = String(out.stdout || '');
+  const status = (stdout.match(/HTTP_STATUS=(\d+)/) || [])[1] || '';
+  const bodyText = (stdout.match(/BODY=([\s\S]*)/) || [])[1] || '';
+  let json = null;
+  try { json = JSON.parse(bodyText); } catch {}
+  return { ok: out.ok && status.startsWith('2'), status: Number(status || 0), body: bodyText, json, stdout, stderr: out.stderr || '', url: target };
 }
 
 function pickSshRuntime(config = {}) {
@@ -356,6 +497,66 @@ function resolveLocalUserLayerSource(userId = '') {
   return fs.existsSync(base) ? base : '';
 }
 
+function resolveBoxWorkRoot(config = {}) {
+  return config?.recover?.boxWorkRoot || '/mmc/myt_recover_work';
+}
+
+function resolveBoxRecoverWorkspace(config = {}, userId = '') {
+  const root = resolveBoxWorkRoot(config);
+  return {
+    root,
+    taskDir: path.posix.join(root, String(userId || 'unknown')),
+    sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+    remoteMbp: path.posix.join(root, String(userId || 'unknown'), `${userId}.mbp`),
+    extractRoot: path.posix.join(root, String(userId || 'unknown'), 'extract'),
+    appRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'data', 'data', 'com.zhiliaoapp.musically'),
+    cfgDevRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'dev'),
+  };
+}
+
+async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', log }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId);
+  const rawMbp = String(mbp || '').trim();
+  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/')) ? ws.sourceMbp : rawMbp;
+  if (log) log(`DEBUG[prepareRemoteMbpArtifacts]: rawMbp=${rawMbp || '-'} -> sourceMbp=${sourceMbp}`);
+  const cmd = [
+    'set -eu',
+    `SRC=${shellQuote(sourceMbp)}`,
+    `TASK_DIR=${shellQuote(ws.taskDir)}`,
+    `REMOTE_MBP=${shellQuote(ws.remoteMbp)}`,
+    `EXTRACT_ROOT=${shellQuote(ws.extractRoot)}`,
+    'if [ ! -f "$SRC" ]; then echo MBP_MISSING=$SRC; exit 21; fi',
+    'mkdir -p "$TASK_DIR"',
+    'cp -f "$SRC" "$REMOTE_MBP"',
+    'rm -rf "$EXTRACT_ROOT"',
+    'mkdir -p "$EXTRACT_ROOT"',
+    'tar -xzf "$REMOTE_MBP" -C "$EXTRACT_ROOT"',
+    `test -d ${shellQuote(ws.appRoot)}`,
+    'echo REMOTE_MBP_READY=1',
+    'echo REMOTE_EXTRACT_ROOT="$EXTRACT_ROOT"',
+  ].join('; ');
+  const out = await runSshCmd(config, cmd);
+  if (!out.ok) {
+    return { ok: false, step: 'prepare-remote-mbp', error: (out.stderr || out.stdout || out.error || 'remote mbp prepare failed').trim(), workspace: ws, sourceMbp };
+  }
+  return { ok: true, workspace: ws, sourceMbp, detail: (out.stdout || '').trim() };
+}
+
+async function cleanupRemoteRecoverWorkspace({ config = {}, userId = '', log }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId);
+  const cmd = [
+    'set +e',
+    `TASK_DIR=${shellQuote(ws.taskDir)}`,
+    'if [ -n "$TASK_DIR" ] && [ "$TASK_DIR" != "/" ] && [ -d "$TASK_DIR" ]; then rm -rf "$TASK_DIR"; fi',
+    'echo CLEANED_TASK_DIR="$TASK_DIR"',
+  ].join('; ');
+  const out = await runSshCmd(config, cmd);
+  if (log) {
+    if (out.ok) log(`收尾清理：已删除盒子工作目录 ${ws.taskDir}`);
+    else log(`收尾清理失败：${(out.stderr || out.stdout || out.error || 'cleanup failed').trim()}`);
+  }
+  return { ok: out.ok, workspace: ws, detail: (out.stdout || out.stderr || out.error || '').trim() };
+}
 
 function resolveLocalCfgSource(userId = '') {
   if (!userId) return '';
@@ -389,36 +590,93 @@ async function prepareRemoteDeviceFile({ config = {}, localFile = '', remoteFile
   return { ok: true, remoteTmp, remoteFile, sha };
 }
 
-async function injectDeviceFiles({ config = {}, targetName = '', userId = '', log }) {
+async function injectDeviceFiles({ config = {}, targetName = '', userId = '', mbp = '', prepared = null, log }) {
   const resolved = await resolveUserdataImagePath(config, targetName, log);
   if (!resolved.ok || !resolved.userdata) {
     return { ok: false, error: `未找到目标 userdata.img: ${targetName}` };
   }
+  const preparedState = prepared || await prepareRemoteMbpArtifacts({ config, userId, mbp, log });
+  if (!preparedState.ok) {
+    return { ok: false, error: preparedState.error || 'remote mbp prepare failed', step: preparedState.step, workspace: preparedState.workspace, sourceMbp: preparedState.sourceMbp };
+  }
   const targetRoot = path.posix.dirname(resolved.userdata);
-  const cfgSource = resolveLocalCfgSource(userId);
+  const cfgDevRoot = preparedState.workspace?.cfgDevRoot || path.posix.join(resolveBoxWorkRoot(config), String(userId || 'unknown'), 'extract', 'dev');
+  const findCfgCmd = [
+    'set -eu',
+    `CFG_DEV_ROOT=${shellQuote(cfgDevRoot)}`,
+    'CFG_DIR=$(find "$CFG_DEV_ROOT" -maxdepth 1 -mindepth 1 -type d -name ".cfg-*" | head -n 1)',
+    'if [ -z "$CFG_DIR" ]; then echo CFG_DIR_MISSING; exit 31; fi',
+    'echo "$CFG_DIR"',
+  ].join('; ');
+  const cfgDirOut = await runSshCmd(config, findCfgCmd);
+  if (!cfgDirOut.ok) {
+    return { ok: false, error: (cfgDirOut.stderr || cfgDirOut.stdout || cfgDirOut.error || 'cfg dir resolve failed').trim(), step: 'resolve-remote-cfg-dir', targetRoot, cfgDevRoot };
+  }
+  const cfgSource = String(cfgDirOut.stdout || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || '';
   if (!cfgSource) {
-    return { ok: false, error: `未找到本地机参目录: userId=${userId}` };
+    return { ok: false, error: `未找到盒子机参目录: ${cfgDevRoot}`, step: 'resolve-remote-cfg-dir', targetRoot, cfgDevRoot };
   }
-  const mapping = [
-    ['cfg.json', `${targetRoot}/cfg.json`],
-    ['baseCfg.json', `${targetRoot}/baseCfg.json`],
-    ['cfg.json', `${targetRoot}/modelData/cfg.json`],
-    ['telephone.json', `${targetRoot}/modelData/telephone.json`],
-    ['location.json', `${targetRoot}/modelData/location.json`],
-    ['device_info.json', `${targetRoot}/modelData/device_info.json`],
-    ['pif.json', `${targetRoot}/modelData/pif.json`],
-    ['baseCfg.json', `${targetRoot}/modelData/baseCfg.json`],
-  ];
+  const listCmd = [
+    'set -eu',
+    `CFG_DIR=${shellQuote(cfgSource)}`,
+    'cd "$CFG_DIR"',
+    'for f in *; do [ -f "$f" ] && printf "%s\\n" "$f"; done | sort',
+  ].join('; ');
+  const listOut = await runSshCmd(config, listCmd);
+  if (!listOut.ok) {
+    return { ok: false, error: (listOut.stderr || listOut.stdout || listOut.error || 'cfg file list failed').trim(), step: 'list-remote-cfg-files', targetRoot, cfgSource };
+  }
+  const cfgFiles = String(listOut.stdout || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  if (!cfgFiles.length) {
+    return { ok: false, error: `机参目录内没有可复制文件: ${cfgSource}`, step: 'list-remote-cfg-files', targetRoot, cfgSource };
+  }
+
+  const rootDupSet = new Set(['cfg.json', 'baseCfg.json']);
   const results = [];
-  for (const [name, remoteFile] of mapping) {
-    const localFile = path.join(cfgSource, name);
-    log(`机参逐个覆盖：${name} -> ${remoteFile}`);
-    const one = await prepareRemoteDeviceFile({ config, localFile, remoteFile, log });
-    if (!one.ok) return { ...one, targetRoot, cfgSource, results };
-    results.push({ name, remoteFile, sha: one.sha });
-    log(`机参校验完成：${name} sha=${one.sha || '-'}`);
+  for (const name of cfgFiles) {
+    results.push({ name, remoteFile: `${targetRoot}/modelData/${name}`, copied: true, mode: 'bulk' });
+    if (rootDupSet.has(name)) results.push({ name, remoteFile: `${targetRoot}/${name}`, copied: true, mode: 'bulk-root-dup' });
   }
-  return { ok: true, targetRoot, cfgSource, results };
+
+  const quotedFiles = cfgFiles.map((name) => shellQuote(name)).join(' ');
+  log(`机参批量覆盖开始：共 ${cfgFiles.length} 个源文件，目标 modelData + 根目录补位`);
+  const bulkCmd = [
+    'set -eu',
+    `SRC_DIR=${shellQuote(cfgSource)}`,
+    `TARGET_ROOT=${shellQuote(targetRoot)}`,
+    'MODEL_DIR="$TARGET_ROOT/modelData"',
+    'mkdir -p "$MODEL_DIR"',
+    `(cd "$SRC_DIR" && tar -cf - ${quotedFiles}) | (cd "$MODEL_DIR" && tar -xf -)`,
+    'if [ -f "$SRC_DIR/cfg.json" ]; then cp -f "$SRC_DIR/cfg.json" "$TARGET_ROOT/cfg.json"; fi',
+    'if [ -f "$SRC_DIR/baseCfg.json" ]; then cp -f "$SRC_DIR/baseCfg.json" "$TARGET_ROOT/baseCfg.json"; fi',
+    'sync',
+    'echo BULK_COPY_OK=1',
+    'echo BULK_MODEL_DIR="$MODEL_DIR"',
+    'find "$MODEL_DIR" -maxdepth 1 -type f | sed -n "1,40p"',
+  ].join('; ');
+  const bulkOut = await runSshCmd(config, bulkCmd);
+  if (!bulkOut.ok) {
+    return { ok: false, error: (bulkOut.stderr || bulkOut.stdout || bulkOut.error || 'bulk remote device file failed').trim(), step: 'bulk-apply-remote-device-files', targetRoot, cfgSource, results };
+  }
+  log('机参批量覆盖完成');
+  const bulkText = String(bulkOut.stdout || '').trim();
+  if (bulkText) {
+    for (const line of bulkText.split(/\r?\n/)) log(`机参批量日志：${line}`);
+  }
+
+  const verifyCmd = [
+    'set -eu',
+    `CFG=${shellQuote(targetRoot + '/modelData/cfg.json')}`,
+    `DINFO=${shellQuote(targetRoot + '/modelData/device_info.json')}`,
+    `PIF=${shellQuote(targetRoot + '/modelData/pif.json')}`,
+    "python3 - <<'PY'\nimport json\nfrom pathlib import Path\nimport os\nfor key, path in [('cfg', os.environ.get('CFG')), ('dinfo', os.environ.get('DINFO')), ('pif', os.environ.get('PIF'))]:\n    if not path or not Path(path).exists():\n        continue\n    try:\n        data=json.loads(Path(path).read_text())\n    except Exception:\n        continue\n    if key=='cfg':\n        print('VERIFY_CFG_MODEL=' + str(data.get('model','')))\n        prop=data.get('prop') or {}\n        print('VERIFY_CFG_PATCH=' + str(prop.get('ro.build.version.security_patch','')))\n    elif key=='dinfo':\n        base=data.get('base') or {}\n        prop=data.get('prop') or {}\n        build=prop.get('Build') or {}\n        print('VERIFY_DINFO_MODEL=' + str(base.get('deviceName','') or build.get('Build.MODEL','')))\n        print('VERIFY_DINFO_BUILD=' + str(build.get('Build.DISPLAY','')))\n    elif key=='pif':\n        print('VERIFY_PIF_MODEL=' + str(data.get('MODEL','')))\n        print('VERIFY_PIF_FINGERPRINT=' + str(data.get('FINGERPRINT','')))\nPY",
+  ].join('; ');
+  const verifyOut = await runSshCmd(config, verifyCmd);
+  const verifyText = String(verifyOut.stdout || '').trim();
+  if (verifyText) {
+    for (const line of verifyText.split(/\r?\n/)) log(`机参回读：${line}`);
+  }
+  return { ok: true, targetRoot, cfgSource, results, verify: verifyText, workspace: preparedState.workspace, sourceMbp: preparedState.sourceMbp };
 }
 
 function buildRecoverJobId(userId = '') {
@@ -470,17 +728,14 @@ async function uploadUserLayerEntry({ config = {}, relPath = '', localSourceBase
   };
 }
 
-async function prepareRemoteUserLayer({ config = {}, userId = '', log }) {
-  const localSourceBase = resolveLocalUserLayerSource(userId);
-  if (!localSourceBase) {
-    return { ok: false, error: `未找到本地用户层目录: userId=${userId}` };
+async function prepareRemoteUserLayer({ config = {}, userId = '', mbp = '', prepared = null, log }) {
+  const preparedState = prepared || await prepareRemoteMbpArtifacts({ config, userId, mbp, log });
+  if (!preparedState.ok) {
+    return { ok: false, error: preparedState.error, step: preparedState.step, workspace: preparedState.workspace, sourceMbp: preparedState.sourceMbp };
   }
 
   const jobId = buildRecoverJobId(userId);
-  const jobLocalDir = path.resolve(process.cwd(), 'tmp', 'recover-jobs', jobId, 'user-layer');
-  const remoteSourceBase = `/mmc/mbp_extract_${userId}_live/data/data/com.zhiliaoapp.musically`;
-  ensureDir(jobLocalDir);
-
+  const remoteSourceBase = preparedState.workspace.appRoot;
   const entries = [
     'shared_prefs',
     'files/keva',
@@ -489,14 +744,6 @@ async function prepareRemoteUserLayer({ config = {}, userId = '', log }) {
     'files/ColdBootFilePrefs',
     'databases',
   ];
-  const uploaded = [];
-  for (const relPath of entries) {
-    log(`上传用户层条目：${relPath}`);
-    const one = await uploadUserLayerEntry({ config, relPath, localSourceBase, remoteSourceBase, jobLocalDir, log });
-    if (!one.ok) return { ...one, jobId, localSourceBase, remoteSourceBase, uploaded };
-    uploaded.push(one);
-    log(`上传完成：${relPath}`);
-  }
 
   const verifyCmd = [
     'set -eu',
@@ -506,17 +753,57 @@ async function prepareRemoteUserLayer({ config = {}, userId = '', log }) {
   ].join('; ');
   const verify = await runSshCmd(config, verifyCmd);
   if (!verify.ok) {
-    return { ok: false, jobId, localSourceBase, remoteSourceBase, uploaded, step: 'verify', error: (verify.stderr || verify.stdout || verify.error || 'verify failed').trim() };
+    return { ok: false, jobId, remoteSourceBase, workspace: preparedState.workspace, step: 'verify', error: (verify.stderr || verify.stdout || verify.error || 'verify failed').trim() };
   }
 
-  return { ok: true, jobId, localSourceBase, remoteSourceBase, uploaded, verify: (verify.stdout || '').trim() };
+  return {
+    ok: true,
+    jobId,
+    remoteSourceBase,
+    sourceMbp: preparedState.sourceMbp,
+    workspace: preparedState.workspace,
+    entries,
+    prepared: preparedState.detail || '',
+    verify: (verify.stdout || '').trim(),
+  };
 }
 
-async function runRemoteScript(config = {}, remoteScript = '') {
+async function runRemoteScript(config = {}, remoteScript = '', args = []) {
   if (!remoteScript) return { ok: false, error: 'missing remoteScript' };
-  return runSshCmd(config, `sh ${shellQuote(remoteScript)}`);
+  const argText = Array.isArray(args) && args.length ? ' ' + args.map((x) => shellQuote(String(x ?? ''))).join(' ') : '';
+  return runSshCmd(config, `sh ${shellQuote(remoteScript)}${argText}`);
 }
 
+
+
+function resolveTargetUserdataPath(targetName = '') {
+  const base = path.resolve(process.cwd(), 'tmp', 'targets', targetName || '');
+  const meta = safeReadJson(path.join(base, 'meta.json'), {});
+  return String(meta?.userdata || '').trim();
+}
+
+function getRecoverIdentityArgs(config = {}) {
+  return [
+    String(config?.recover?.baselineIdentity?.uid || ''),
+    String(config?.recover?.userId || ''),
+    String(config?.recover?.baselineIdentity?.username || ''),
+    String(config?.recover?.detected?.username || ''),
+    String(config?.recover?.baselineIdentity?.name || ''),
+    String(config?.recover?.detected?.name || ''),
+  ];
+}
+
+function resolveChecklistLocalPath(config = {}) {
+  return String(
+    config?.recover?.oldIdentityChecklist
+    || path.resolve(process.cwd(), 'tmp', 'checklists', 'old-identity-checklist-v1.tsv')
+  ).trim();
+}
+
+function resolveChecklistRemotePath(config = {}) {
+  const name = path.basename(resolveChecklistLocalPath(config) || 'old-identity-checklist-v1.tsv');
+  return `/tmp/${name}`;
+}
 
 async function ensureRemoteRecoverScripts({ config = {}, log }) {
   const localBase = path.resolve(process.cwd(), 'tmp', 'live-run');
@@ -524,6 +811,7 @@ async function ensureRemoteRecoverScripts({ config = {}, log }) {
     ['slot1_targeted_cleanup.sh', '/tmp/slot1_targeted_cleanup.sh'],
     ['slot1_inject_user_layer.sh', '/tmp/slot1_inject_user_layer.sh'],
     ['slot1_precise_postinject_scan.sh', '/tmp/slot1_precise_postinject_scan.sh'],
+    [path.relative(localBase, resolveChecklistLocalPath(config)), resolveChecklistRemotePath(config)],
   ];
   for (const [name, remote] of mapping) {
     const local = path.join(localBase, name);
@@ -543,32 +831,22 @@ async function ensureRemoteRecoverScripts({ config = {}, log }) {
   return { ok: true, scripts: mapping.map((x) => x[1]) };
 }
 
+function parseKeyedCounts(stdout = '', keys = []) {
+  const text = String(stdout || '');
+  const out = {};
+  for (const key of keys) {
+    const m = text.match(new RegExp(`${key}=(-?` + String.raw`\d+` + `)`));
+    out[key] = m ? Number(m[1]) : null;
+  }
+  return out;
+}
+
 function parseRewriteCounts(stdout = '') {
-  const pick = (key) => {
-    const m = String(stdout).match(new RegExp(`${key}=(\d+)`));
-    return m ? Number(m[1]) : null;
-  };
-  return {
-    files: pick('files'),
-    old_uid: pick('old_uid'),
-    old_username: pick('old_username'),
-    old_name: pick('old_name'),
-  };
+  return parseKeyedCounts(stdout, ['files', 'old_uid', 'old_username', 'old_name']);
 }
 
 function parseScanCounts(stdout = '') {
-  const pick = (key) => {
-    const m = String(stdout).match(new RegExp(`${key}=(\d+)`));
-    return m ? Number(m[1]) : null;
-  };
-  return {
-    old_uid: pick('old_uid'),
-    old_username: pick('old_username'),
-    old_name: pick('old_name'),
-    new_uid: pick('new_uid'),
-    new_username: pick('new_username'),
-    new_name: pick('new_name'),
-  };
+  return parseKeyedCounts(stdout, ['old_uid', 'old_username', 'old_name', 'new_uid', 'new_username', 'new_name']);
 }
 
 function printProbeSummary(report) {
@@ -623,7 +901,7 @@ function buildRecoverPlan({ targetName, target, baseline, mbp, userId, overrides
     { step: 3, key: 'inject_device', action: '注入机参层', detail: '按 MBP/提取层写入 machine parameter files', dangerous: true },
     { step: 4, key: 'clean_old_identity', action: '清旧身份', detail: '旧 UID / username / name 第一轮清理与定点清理', dangerous: true },
     { step: 5, key: 'inject_user_layer', action: '注入用户层', detail: '执行用户层合并覆盖与必要替换', dangerous: true },
-    { step: 6, key: 'precise_rescan', action: '精确复扫', detail: '若仍有残留，则回到第4步继续清理', dangerous: false },
+    { step: 6, key: 'precise_rescan', action: '按清单复验', detail: '若仍有残留，则回到第4步继续清理', dangerous: false },
     { step: 7, key: 'network_vpc', action: '配置 VPC', detail: '绑定并回读确认 VPC', dangerous: true },
     { step: 8, key: 'network_s5', action: '配置 S5', detail: '设置并回读确认 S5', dangerous: true },
     { step: 9, key: 'start_container', action: '启动容器', detail: '完成恢复写入后重新启动目标容器', dangerous: true },
@@ -767,7 +1045,12 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
     mbp: resolvedMbp || null,
     userId: userId || null,
     checks: [],
+    rows: [],
+    instanceApiResolved: null,
+    rpaResolved: null,
   };
+
+  report.rows.push(...await probeBase(boxBase));
 
   report.checks.push(filePathCheck('baseline', baseline));
   report.checks.push(resolvedMbp ? { item: 'mbp', ok: true, note: `已自动解析 ${resolvedMbp}` } : { item: 'mbp', ok: false, note: '未从 UID 检测结果解析到 MBP' });
@@ -787,6 +1070,21 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
       report.checks.push({ item: 'targetState', ok: ['running', 'exited'].includes(target.status), note: `当前状态 ${target.status}` });
       report.checks.push({ item: 'instanceApiOverride', ok: !!report.overrides.instanceApi, note: report.overrides.instanceApi || '缺少实例 API 覆盖' });
       report.checks.push({ item: 'rpaOverride', ok: !!(report.overrides.rpaHost && report.overrides.rpaPort), note: report.overrides.rpaHost && report.overrides.rpaPort ? `${report.overrides.rpaHost}:${report.overrides.rpaPort}` : '缺少 RPA 覆盖' });
+
+      const baseUrl = new URL(boxBase);
+      let resolvedApi = report.overrides.instanceApi || null;
+      let resolvedRpaHost = report.overrides.rpaHost || null;
+      let resolvedRpaPort = report.overrides.rpaPort ? Number(report.overrides.rpaPort) : null;
+      if (!resolvedApi && target.api) resolvedApi = withPort(baseUrl.toString(), target.api);
+      if (!resolvedRpaHost && target.rpa) resolvedRpaHost = baseUrl.hostname;
+      if (!resolvedRpaPort && target.rpa) resolvedRpaPort = Number(target.rpa);
+      if (resolvedApi) {
+        report.instanceApiResolved = resolvedApi;
+        report.rows.push(...await probeInstanceApi(resolvedApi));
+      }
+      if (resolvedRpaHost && resolvedRpaPort) {
+        report.rpaResolved = { host: resolvedRpaHost, port: resolvedRpaPort };
+      }
     } else {
       report.checks.push({ item: 'targetExists', ok: false, note: `未找到目标实例 ${targetName}` });
     }
@@ -1060,9 +1358,9 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
   }
 
   try {
+    let preparedWorkspace = null;
     await setStage(plan[0], async () => {
       log('开始预检：校验目标、基座、用户、容器状态');
-      await sleepMs(150);
       return { detail: `预检通过 ${pre.summary.okCount}/${pre.summary.total}` };
     });
 
@@ -1088,12 +1386,20 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
     });
 
     await setStage(plan[2], async () => {
-      log('开始注入机参层：逐个覆盖、逐个校验');
-      const injected = await injectDeviceFiles({ config, targetName, userId, log });
+      log('子任务 3.0：准备本次 recover 共用盒子工作目录（仅一次）');
+      preparedWorkspace = await prepareRemoteMbpArtifacts({ config, userId, mbp, log });
+      if (!preparedWorkspace?.ok) {
+        throw new Error(`盒子工作目录准备失败: ${preparedWorkspace?.error || preparedWorkspace?.step || 'prepare failed'}`);
+      }
+      if (preparedWorkspace?.detail) {
+        log(`子任务 3.0：盒子工作目录已就绪 -> ${preparedWorkspace.detail.replace(/\s+/g, ' ').slice(0, 400)}`);
+      }
+      log('开始注入机参层：批量覆盖、关键字段校验');
+      const injected = await injectDeviceFiles({ config, targetName, userId, mbp, prepared: preparedWorkspace, log });
       if (!injected.ok) {
         throw new Error(`机参层注入失败: ${injected.error || injected.step || 'inject device failed'}`);
       }
-      return { detail: `机参层逐个覆盖完成，共 ${injected.results.length} 个文件` };
+      return { detail: `机参层整组覆盖完成，共 ${injected.results.length} 个落点${injected.verify ? '，已输出关键字段回读' : ''}` };
     });
 
     const runCleanupStage = async (round = 1) => setStage(plan[3], async () => {
@@ -1106,7 +1412,12 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
         throw new Error(`恢复脚本同步失败: ${synced.error || synced.step || 'sync failed'}`);
       }
       log(`子任务 4.${round}：执行清旧脚本`);
-      const cleanupOut = await runRemoteScript(config, '/tmp/slot1_targeted_cleanup.sh');
+      const resolved = await resolveUserdataImagePath(config, targetName, log);
+      if (!resolved.ok || !resolved.userdata) {
+        throw new Error(`未找到目标 userdata.img: ${targetName}`);
+      }
+      const cleanupArgs = [resolved.userdata, resolveChecklistRemotePath(config), ...getRecoverIdentityArgs(config)];
+      const cleanupOut = await runRemoteScript(config, '/tmp/slot1_targeted_cleanup.sh', cleanupArgs);
       if (!cleanupOut.ok) {
         throw new Error(`清旧脚本失败: ${(cleanupOut.stderr || cleanupOut.stdout || cleanupOut.error || 'cleanup failed').trim()}`);
       }
@@ -1116,38 +1427,57 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
       if (rewriteCounts.files !== null) {
         log(`子任务 4.${round}：替换计数 files=${rewriteCounts.files ?? '-'}, old_uid=${rewriteCounts.old_uid ?? '-'}, old_username=${rewriteCounts.old_username ?? '-'}, old_name=${rewriteCounts.old_name ?? '-'}`);
       }
-      return { detail: `旧身份清理脚本已执行（第 ${round} 轮）`, rewriteCounts };
+
+      const strictVerifyArgs = [resolved.userdata, resolveChecklistRemotePath(config), String(config?.recover?.baselineIdentity?.uid || ''), String(config?.recover?.baselineIdentity?.username || ''), String(config?.recover?.baselineIdentity?.name || ''), String(config?.recover?.userId || ''), String(config?.recover?.detected?.username || ''), String(config?.recover?.detected?.name || '')];
+      const strictVerifyOut = await runRemoteScript(config, '/tmp/slot1_precise_postinject_scan.sh', strictVerifyArgs);
+      if (!strictVerifyOut.ok) {
+        throw new Error(`清旧后严格复验失败: ${(strictVerifyOut.stderr || strictVerifyOut.stdout || strictVerifyOut.error || 'strict verify failed').trim()}`);
+      }
+      const strictCounts = parseScanCounts(strictVerifyOut.stdout || '');
+      log(`子任务 4.${round}：严格复验 old_uid=${strictCounts.old_uid ?? '-'}, old_username=${strictCounts.old_username ?? '-'}, old_name=${strictCounts.old_name ?? '-'}, new_uid=${strictCounts.new_uid ?? '-'}, new_username=${strictCounts.new_username ?? '-'}, new_name=${strictCounts.new_name ?? '-'}`);
+      return { detail: `旧身份清理脚本已执行（第 ${round} 轮）`, rewriteCounts, strictCounts };
     });
 
     const runInjectUserLayerStage = async () => setStage(plan[4], async () => {
-      log('子任务 5.1：准备本地固定工作目录与远端用户层目录');
-      const prepared = await prepareRemoteUserLayer({ config, userId, log });
+      log('子任务 5.1：复用本次 recover 已准备好的盒子工作目录（不重复解包）');
+      const prepared = await prepareRemoteUserLayer({ config, userId, mbp, prepared: preparedWorkspace, log });
       if (!prepared.ok) {
-        throw new Error(`用户层上传失败: ${prepared.error || prepared.detail || prepared.step || 'prepare failed'}`);
+        throw new Error(`用户层准备失败: ${prepared.error || prepared.detail || prepared.step || 'prepare failed'}`);
       }
-      log(`子任务 5.2：用户层四段上传完成 -> jobId=${prepared.jobId}`);
-      if (prepared.verify) log(`子任务 5.3：关键文件校验通过 -> ${prepared.verify.replace(/\s+/g, ' ').slice(0, 400)}`);
-      const injectOut = await runRemoteScript(config, '/tmp/slot1_inject_user_layer.sh');
+      if (prepared.prepared) log(`子任务 5.2：盒子解包完成 -> ${prepared.prepared.replace(/\s+/g, ' ').slice(0, 400)}`);
+      log(`子任务 5.3：本轮用户层改为盒子内本地注入，不再从服务器回传碎文件 -> jobId=${prepared.jobId}`);
+      if (prepared.verify) log(`子任务 5.4：关键文件校验通过 -> ${prepared.verify.replace(/\s+/g, ' ').slice(0, 400)}`);
+      const resolved = await resolveUserdataImagePath(config, targetName, log);
+      if (!resolved.ok || !resolved.userdata) {
+        throw new Error(`未找到目标 userdata.img: ${targetName}`);
+      }
+      const injectArgs = [resolved.userdata, prepared.remoteSourceBase];
+      const injectOut = await runRemoteScript(config, '/tmp/slot1_inject_user_layer.sh', injectArgs);
       if (!injectOut.ok) {
         throw new Error(`用户层注入脚本失败: ${(injectOut.stderr || injectOut.stdout || injectOut.error || 'inject failed').trim()}`);
       }
       const injectLog = `${injectOut.stdout || ''}`.trim();
-      if (injectLog) log(`子任务 5.4：注入结果 -> ${injectLog.replace(/\s+/g, ' ').slice(0, 400)}`);
-      return { detail: `用户层已按分目录稳定链路上传并注入：jobId=${prepared.jobId}` };
+      if (injectLog) log(`子任务 5.5：注入结果 -> ${injectLog.replace(/\s+/g, ' ').slice(0, 400)}`);
+      return { detail: `用户层已改为盒子内解包 + 盒子内拷贝注入：jobId=${prepared.jobId}` };
     });
 
     const runPreciseRescanStage = async (round = 1) => setStage(plan[5], async () => {
-      log(`子任务 6.${round}：执行全盘精确计数复扫`);
-      const scanOut = await runRemoteScript(config, '/tmp/slot1_precise_postinject_scan.sh');
+      log(`子任务 6.${round}：执行按清单严格复验`);
+      const resolved = await resolveUserdataImagePath(config, targetName, log);
+      if (!resolved.ok || !resolved.userdata) {
+        throw new Error(`未找到目标 userdata.img: ${targetName}`);
+      }
+      const scanArgs = [resolved.userdata, resolveChecklistRemotePath(config), String(config?.recover?.baselineIdentity?.uid || ''), String(config?.recover?.baselineIdentity?.username || ''), String(config?.recover?.baselineIdentity?.name || ''), String(config?.recover?.userId || ''), String(config?.recover?.detected?.username || ''), String(config?.recover?.detected?.name || '')];
+      const scanOut = await runRemoteScript(config, '/tmp/slot1_precise_postinject_scan.sh', scanArgs);
       if (!scanOut.ok) {
-        throw new Error(`精确复扫脚本失败: ${(scanOut.stderr || scanOut.stdout || scanOut.error || 'scan failed').trim()}`);
+        throw new Error(`按清单复验脚本失败: ${(scanOut.stderr || scanOut.stdout || scanOut.error || 'scan failed').trim()}`);
       }
       const counts = parseScanCounts(scanOut.stdout || '');
-      log(`子任务 6.${round}：复扫结果 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}, new_uid=${counts.new_uid ?? '-'}, new_username=${counts.new_username ?? '-'}, new_name=${counts.new_name ?? '-'}`);
+      log(`子任务 6.${round}：严格复验结果 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}, new_uid=${counts.new_uid ?? '-'}, new_username=${counts.new_username ?? '-'}, new_name=${counts.new_name ?? '-'}`);
       const scanLog = `${scanOut.stdout || ''}`.trim();
-      if (scanLog) log(`子任务 6.${round}：复扫明细 -> ${scanLog.replace(/\s+/g, ' ').slice(0, 500)}`);
+      if (scanLog) log(`子任务 6.${round}：严格复验明细 -> ${scanLog.replace(/\s+/g, ' ').slice(0, 500)}`);
       return {
-        detail: `复扫完成 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}`,
+        detail: `按清单复验完成 old_uid=${counts.old_uid ?? '-'}, old_username=${counts.old_username ?? '-'}, old_name=${counts.old_name ?? '-'}`,
         counts,
       };
     });
@@ -1156,18 +1486,20 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
     await runInjectUserLayerStage();
     const maxCleanupRounds = Number(config?.recover?.maxCleanupRounds || 5);
     let cleanupRound = 1;
+    let finalScanCounts = null;
     while (true) {
       const scanStage = await runPreciseRescanStage(cleanupRound);
       const counts = scanStage?.result?.counts || {};
+      finalScanCounts = counts;
       const oldUidLeft = Number(counts.old_uid || 0);
       const oldUsernameLeft = Number(counts.old_username || 0);
       const oldNameLeft = Number(counts.old_name || 0);
-      if (!oldUidLeft && !oldUsernameLeft && !oldNameLeft) {
-        log(`子任务 6.${cleanupRound}：旧身份三项已归零，进入网络层`);
+      if (!oldUidLeft && !oldUsernameLeft) {
+        log(`子任务 6.${cleanupRound}：旧 uid / username 已归零，进入网络层（old_name=${oldNameLeft} 仅展示不阻塞）`);
         break;
       }
       if (cleanupRound >= maxCleanupRounds) {
-        throw new Error(`精确复扫后仍有旧身份残留：old_uid=${oldUidLeft}, old_username=${oldUsernameLeft}, old_name=${oldNameLeft}；已达最大清理轮次 ${maxCleanupRounds}`);
+        throw new Error(`按清单复验后仍有旧身份残留：old_uid=${oldUidLeft}, old_username=${oldUsernameLeft}, old_name=${oldNameLeft}；已达最大清理轮次 ${maxCleanupRounds}`);
       }
       emit({ type: 'flow', action: 'jump', fromStep: 6, toStep: 4, reason: `检测到旧身份残留，回到清旧身份（第 ${cleanupRound + 1} 轮）` });
       log(`子任务 6.${cleanupRound}：检测到旧残留，回退到第4步继续清旧（下一轮=${cleanupRound + 1}）`);
@@ -1177,36 +1509,163 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
 
     await setStage(plan[6], async () => {
       log('开始配置 VPC');
-      await sleepMs(180);
-      return { detail: 'VPC 配置占位已执行' };
+      const vpcRow = pickRow(pre.rows || [], 'box-api', '/mytVpc/group');
+      if (!vpcRow?.result?.ok) {
+        throw new Error(`VPC 阶段失败：盒子 /mytVpc/group 不可用 (${vpcRow?.result?.error || 'no response'})`);
+      }
+      const status = vpcRow?.result?.status || '-';
+      log(`VPC 阶段：盒子 /mytVpc/group 连通，http=${status}`);
+      return {
+        detail: `VPC 阶段已接入真实检查：/mytVpc/group 可达（http=${status}）`,
+        check: { path: '/mytVpc/group', httpStatus: status },
+      };
     });
 
     await setStage(plan[7], async () => {
-      log('开始配置 S5');
-      await sleepMs(180);
-      return { detail: 'S5 配置占位已执行' };
+      log('开始配置 S5：先检查容器是否已启动');
+      let targetStatus = pre.target?.status || 'unknown';
+      let resolvedInstanceApi = pre.instanceApiResolved || null;
+      const currentDiscovery = await discoverInstances(boxBase);
+      if (currentDiscovery.ok) {
+        const currentTarget = currentDiscovery.list.find((x) => x.name === targetName) || null;
+        if (currentTarget) {
+          targetStatus = currentTarget.status || targetStatus;
+          if (currentTarget.ip) {
+            resolvedInstanceApi = resolveInstanceApiFromTarget(currentTarget, boxBase);
+          }
+          log(`S5 阶段：实时探测容器状态=${targetStatus}${resolvedInstanceApi ? `，instanceApi=${resolvedInstanceApi}` : ''}`);
+        } else {
+          log('S5 阶段：实时探测未找到目标容器，沿用前序状态');
+        }
+      } else {
+        log(`S5 阶段：实时探测失败，沿用前序状态 (${currentDiscovery.error || 'unknown'})`);
+      }
+      if (targetStatus !== 'running') {
+        log(`S5 阶段：目标容器当前为 ${targetStatus}，先启动容器 -> ${targetName}`);
+        const startResult = await postJson(new URL('/android/start', boxBase).toString(), { name: targetName });
+        if (!startResult.ok) throw new Error(startResult.error || '启动目标实例失败');
+        const waited = await waitForContainerStatus({ boxBase, targetName, want: 'running', timeoutMs: 90000, intervalMs: 3000 });
+        if (!waited.ok) {
+          throw new Error(`S5 阶段失败：容器启动后未进入 running (${waited.error || 'unknown'})`);
+        }
+        targetStatus = waited.target?.status || 'running';
+        log(`S5 阶段：容器已启动，当前状态=${targetStatus}`);
+        const waitedApiPort = waited.target?.api || null;
+        if (waited.target?.ip) {
+          resolvedInstanceApi = `http://${waited.target.ip}:9082`;
+          log(`S5 阶段：启动后重新解析实例 API -> ${resolvedInstanceApi}`);
+        } else if (waitedApiPort) {
+          log('S5 阶段：启动后仅拿到外部映射端口，先不采用，准备再探测一次');
+        } else {
+          log('S5 阶段：启动后实例 API 端口仍未出现在容器信息里，准备再探测一次');
+          const rediscovered = await discoverInstances(boxBase);
+          if (rediscovered.ok) {
+            const refreshed = rediscovered.list.find((x) => x.name === targetName) || null;
+            const refreshedApiPort = refreshed?.api || null;
+            if (refreshed?.ip) {
+              resolvedInstanceApi = `http://${refreshed.ip}:9082`;
+              log(`S5 阶段：二次探测实例 API 成功 -> ${resolvedInstanceApi}`);
+            } else if (refreshedApiPort) {
+              log('S5 阶段：二次探测仍只有外部映射端口，继续等待内网 IP');
+            }
+          }
+        }
+      } else {
+        log('S5 阶段：目标容器已是 running');
+        if (!resolvedInstanceApi) {
+          const rediscovered = await discoverInstances(boxBase);
+          if (rediscovered.ok) {
+            const refreshed = rediscovered.list.find((x) => x.name === targetName) || null;
+            const refreshedApiPort = refreshed?.api || null;
+            if (refreshed?.ip) {
+              resolvedInstanceApi = `http://${refreshed.ip}:9082`;
+              log(`S5 阶段：补充解析实例 API -> ${resolvedInstanceApi}`);
+            } else if (refreshedApiPort) {
+              log('S5 阶段：补充探测仅拿到外部映射端口，继续使用空值等待后续解析');
+            }
+          }
+        }
+      }
+
+      const detectedProxyIp = getNested(config, ['recover', 'detected', 'proxyIp'], null) || null;
+      if (!detectedProxyIp) {
+        throw new Error('S5 阶段失败：未从 detect/MBP 中解析出外网代理 IP');
+      }
+      const proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
+      if (!proxyMap.ok) {
+        throw new Error(`S5 阶段失败：代理映射查找失败 (${proxyMap.error || 'unknown'})`);
+      }
+      const s5 = proxyMap.proxy;
+      log(`S5 阶段：代理映射命中 ${detectedProxyIp} -> ${s5.ip}:${s5.port} user=${s5.user || '-'} type=${s5.type}`);
+      if (!resolvedInstanceApi) {
+        throw new Error('S5 阶段失败：未解析出实例 API 地址');
+      }
+      log(`S5 阶段：等待实例 /proxy 就绪 -> ${resolvedInstanceApi}`);
+      const proxyReady = await waitForInstanceProxyReadyViaBox({ config, instanceApi: resolvedInstanceApi, timeoutMs: 90000, intervalMs: 3000 });
+      if (!proxyReady.ok) {
+        throw new Error(`S5 阶段失败：实例 /proxy 不可用 (${proxyReady?.result?.error || proxyReady.error || 'no response'})`);
+      }
+      const beforeQuery = 'cmd=1';
+      const beforeState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: beforeQuery });
+      log(`S5 阶段：写入前代理状态 http=${beforeState.status || '-'}${beforeState.body ? ` body=${beforeState.body}` : ''}`);
+      const writeQuery = `cmd=2&type=${encodeURIComponent(String(s5.type || '2'))}&ip=${encodeURIComponent(String(s5.ip || ''))}&port=${encodeURIComponent(String(s5.port || ''))}&usr=${encodeURIComponent(String(s5.user || ''))}&pwd=${encodeURIComponent(String(s5.password || ''))}`;
+      log(`S5 阶段：开始写入代理 -> ${s5.ip}:${s5.port} user=${s5.user || '-'} type=${s5.type}`);
+      const writeState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: writeQuery });
+      if (!writeState.ok) {
+        throw new Error(`S5 阶段失败：代理写入调用失败 (http=${writeState.status || '-'} body=${writeState.body || writeState.stderr || '-'})`);
+      }
+      const afterState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
+      if (!afterState.ok) {
+        throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
+      }
+      log(`S5 阶段：写入后代理状态 http=${afterState.status || '-'}${afterState.body ? ` body=${afterState.body}` : ''}`);
+      return {
+        detail: `S5 已按外网 IP=${detectedProxyIp} 从映射表反查并写入 ${s5.ip}:${s5.port}（type=${s5.type}）`,
+        check: {
+          path: '/proxy?cmd=2',
+          instanceApi: resolvedInstanceApi,
+          detectedProxyIp,
+          mappingFile: proxyMap.proxy.mappingFile,
+          applied: { ip: s5.ip, port: s5.port, user: s5.user, type: s5.type },
+          before: { httpStatus: beforeState.status, body: beforeState.body },
+          write: { httpStatus: writeState.status, body: writeState.body },
+          after: { httpStatus: afterState.status, body: afterState.body },
+        },
+      };
     });
 
     await setStage(plan[8], async () => {
-      log(`开始启动容器：${targetName}`);
-      const startResult = await postJson(new URL('/android/start', boxBase).toString(), { name: targetName });
-      if (!startResult.ok) throw new Error(startResult.error || '启动目标实例失败');
-      return { detail: '容器启动请求已发送', result: startResult };
+      log(`启动容器阶段：目标容器当前已用于 S5，跳过重复启动 -> ${targetName}`);
+      return { detail: '容器已在 S5 前置阶段启动或已处于 running，跳过重复启动' };
     });
 
     await setStage(plan[9], async () => {
       log('开始最终验证');
-      await sleepMs(150);
-      return { detail: '最终验证占位已执行' };
+      const counts = finalScanCounts || {};
+      const oldUidLeft = Number(counts.old_uid || 0);
+      const oldUsernameLeft = Number(counts.old_username || 0);
+      const oldNameLeft = Number(counts.old_name || 0);
+      if (!finalScanCounts) {
+        throw new Error('最终验证失败：缺少第6步按清单复验结果');
+      }
+      if (oldUidLeft || oldUsernameLeft) {
+        throw new Error(`最终验证失败：旧 uid/username 仍未归零 old_uid=${oldUidLeft}, old_username=${oldUsernameLeft}, old_name=${oldNameLeft}`);
+      }
+      return {
+        detail: `最终验证通过：旧 uid/username 已归零（old_name=${oldNameLeft} 仅展示，轮次=${cleanupRound}）`,
+        counts,
+      };
     });
 
-    report.message = '恢复任务阶段流已跑通（写入动作仍有占位步骤）';
+    report.message = '恢复任务阶段流已跑通（S5 已接入映射表自动反查 + 真实写入 + 回读校验）';
     emit({ type: 'job', status: 'done', message: report.message });
-    console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
+    log(`任务完成：${report.message}`);
   } catch (err) {
     report.message = String(err?.message || err || '恢复失败');
     emit({ type: 'job', status: 'failed', message: report.message });
-    console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
+    log(`任务失败：${report.message}`);
+  } finally {
+    await cleanupRemoteRecoverWorkspace({ config, userId, log });
   }
 }
 
@@ -1218,11 +1677,11 @@ async function main() {
   const instanceApi = process.env.MYT_INSTANCE_API || pickArg('instance-api', '');
   const rpaHost = process.env.MYT_RPA_HOST || pickArg('rpa-host', '');
   const rpaPort = Number(process.env.MYT_RPA_PORT || pickArg('rpa-port', '0'));
-  const targetName = process.env.MYT_TARGET_NAME || pickArg('target-name', '');
-  const slot = process.env.MYT_SLOT || pickArg('slot', '');
-  const baseline = pickArg('baseline', '');
-  const mbp = pickArg('mbp', '');
-  const userId = pickArg('user-id', '');
+  const targetName = process.env.MYT_TARGET_NAME || pickArg('target-name', config?.recover?.targetName || '');
+  const slot = process.env.MYT_SLOT || pickArg('slot', config?.recover?.slot || '');
+  const baseline = pickArg('baseline', config?.recover?.baseline || '');
+  const mbp = pickArg('mbp', config?.recover?.mbp || '');
+  const userId = pickArg('user-id', config?.recover?.userId || '');
   const jsonOutput = hasFlag('json');
   const dryRun = hasFlag('dry-run');
   const sdkDir = process.env.MYT_RPA_SDK_DIR || pickArg(

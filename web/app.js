@@ -7,7 +7,7 @@ let recoverPollTimer = null;
 const pageMeta = {
   machines: { title: '机位管理', desc: '查看机位、实例、运行状态并直接执行切换/启停。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
-  recover: { title: '恢复任务', desc: '先确定恢复前四个选择项：用户、机位、容器、基座。' },
+  recover: { title: '恢复任务', desc: '按顺序选择：用户 → 基座 → 机位 → 容器，并检查是否匹配。' },
   settings: { title: '参数设置', desc: '配置盒子地址、基座列表等恢复前置参数。' },
 };
 
@@ -25,6 +25,21 @@ function summarizeMessage(data) {
 function showResult(title, data) {
   $('summary').textContent = title + '\n\n' + summarizeMessage(data);
   $('raw').textContent = JSON.stringify(data, null, 2);
+}
+
+function formatReadableTime(input) {
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return input;
+  const MM = String(d.getMonth() + 1).padStart(2, '0');
+  const DD = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${MM}-${DD} ${hh}:${mm}:${ss}`;
+}
+
+function prettifyLogText(text = '') {
+  return String(text || '').replace(/\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\]/g, (_, iso) => `[${formatReadableTime(iso)}]`);
 }
 
 function renderRecoverJob(job = null, logText = '') {
@@ -47,7 +62,8 @@ function renderRecoverJob(job = null, logText = '') {
     ? job.stages.map((x) => `${x.step || '-'} | ${x.label || x.key || '-'} | ${x.status || '-'} | ${x.detail || '-'}`)
     : ['暂无阶段信息'];
   $('recoverStageList').textContent = stageLines.join('\n');
-  $('recoverJobLog').textContent = logText || (Array.isArray(job.logs) ? job.logs.join('\n') : '暂无日志');
+  const mergedLogText = logText || (Array.isArray(job.logs) ? job.logs.join('\n') : '暂无日志');
+  $('recoverJobLog').textContent = prettifyLogText(mergedLogText);
 }
 
 async function pollRecoverJob(jobId) {
@@ -62,11 +78,33 @@ async function pollRecoverJob(jobId) {
     const job = jobOut?.job || null;
     const logText = logOut?.log || '';
     renderRecoverJob(job, logText);
-    if (job && !['done', 'failed', 'finished'].includes(job.status)) {
+    const logEl = $('recoverJobLog');
+    if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    if (job && !['done', 'failed', 'finished', 'stopped'].includes(job.status)) {
       recoverPollTimer = setTimeout(() => pollRecoverJob(jobId), 1000);
+    } else {
+      if (recoverPollTimer) {
+        clearTimeout(recoverPollTimer);
+        recoverPollTimer = null;
+      }
     }
   } catch (err) {
     $('recoverJobLog').textContent = `日志轮询失败: ${err?.message || err}`;
+  }
+}
+
+async function attachLatestRecoverJob() {
+  try {
+    const out = await j('/api/recover/latest');
+    const job = out?.job || null;
+    if (!job?.jobId) {
+      renderRecoverJob(null);
+      return;
+    }
+    renderRecoverJob(job, '正在读取最新日志...');
+    pollRecoverJob(job.jobId);
+  } catch {
+    renderRecoverJob(null);
   }
 }
 
@@ -169,16 +207,61 @@ function fillBaselineSelectors(cfg = {}) {
   $('baselineOptions').value = baselines.join('\n');
 }
 
+function baselineImageHint(baseline = '') {
+  const s = String(baseline || '');
+  const m = s.match(/(tkyds\/custom:[^\/\s]+)/i) || s.match(/(q\d+_all_\d{8,})/i);
+  return m ? m[1] : '';
+}
+
+function containerImageValue(item = {}) {
+  return String(item.image || item.imageName || item.imageTag || '').trim();
+}
+
+function updateRecoverMatchHint() {
+  const baseline = $('recoverBaseline')?.value || '';
+  const target = $('recoverTargetName')?.value || '';
+  const slot = $('recoverSlot')?.value || '';
+  const row = slotRows.find(x => String(x.slot) === String(slot));
+  const item = (row?.all || []).find(x => String(x.name) === String(target));
+  const hintEl = $('recoverMatchHint');
+  if (!hintEl) return;
+  if (!baseline || !item) {
+    hintEl.textContent = '匹配提示：请先选择基座和容器';
+    return;
+  }
+  const b = baselineImageHint(baseline);
+  const c = containerImageValue(item);
+  const matched = b && c && (baseline.includes(c) || c.includes(b) || b === c);
+  hintEl.textContent = matched
+    ? `匹配提示：✅ 当前容器镜像与基座看起来匹配（baseline=${b || '-'} / container=${c || '-'})`
+    : `匹配提示：⚠️ 当前容器镜像可能与基座不匹配（baseline=${b || '-'} / container=${c || '-'})`;
+}
+
 function refreshTargetOptions(preferredTarget = '') {
   const slot = $('recoverSlot')?.value;
+  const baseline = $('recoverBaseline')?.value || '';
+  const baselineHint = baselineImageHint(baseline);
   const row = slotRows.find(x => String(x.slot) === String(slot));
   const items = row ? row.all || [] : [];
+  const sorted = [...items].sort((a, b) => {
+    const ai = containerImageValue(a);
+    const bi = containerImageValue(b);
+    const am = baselineHint && ai && (baseline.includes(ai) || ai.includes(baselineHint));
+    const bm = baselineHint && bi && (baseline.includes(bi) || bi.includes(baselineHint));
+    if (am === bm) return String(a.name || '').localeCompare(String(b.name || ''));
+    return am ? -1 : 1;
+  });
   setSelectOptions(
     $('recoverTargetName'),
-    items.map(x => ({ value: x.name, label: `${x.name} [${x.status}]` })),
+    sorted.map(x => {
+      const img = containerImageValue(x);
+      const matched = baselineHint && img && (baseline.includes(img) || img.includes(baselineHint));
+      return { value: x.name, label: `${matched ? '✅' : '⚠️'} ${x.name} [${x.status}] ${img || ''}`.trim() };
+    }),
     preferredTarget,
   );
   $('recoverTargetMirror').value = $('recoverTargetName').value || '';
+  updateRecoverMatchHint();
 }
 
 function fillSlotSelectors(preferredSlot = '', preferredTarget = '') {
@@ -198,6 +281,7 @@ async function loadConfig() {
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
+  updateRecoverMatchHint();
   $('configSummary').textContent = [
     `boxBase: ${cfg.boxBase || '-'}`,
     `默认目标容器: ${cfg.recover?.targetName || '-'}`,
@@ -225,10 +309,10 @@ async function saveConfig() {
 
 function getRecoverPayload() {
   return {
-    slot: $('recoverSlot')?.value?.trim?.() || '',
-    targetName: $('recoverTargetName')?.value?.trim?.() || '',
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
     baseline: $('recoverBaseline')?.value?.trim?.() || '',
+    slot: $('recoverSlot')?.value?.trim?.() || '',
+    targetName: $('recoverTargetName')?.value?.trim?.() || '',
     mbp: '',
   };
 }
@@ -399,13 +483,63 @@ $('saveConfig').onclick = saveConfig;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
 $('detectUser').onclick = detectUser;
+$('recoverAttachLatest').onclick = attachLatestRecoverJob;
 $('recoverPrecheck').onclick = () => callRecoverApi('precheck');
 $('recoverPlan').onclick = () => callRecoverApi('plan');
 $('recoverDryRun').onclick = () => callRecoverApi('dryrun');
-$('recoverStart').onclick = () => callRecoverApi('start');
-$('recoverSlot').onchange = () => refreshTargetOptions();
-$('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; };
-$('recoverDetectedUser').onchange = () => saveRecoverConfig({}, { silent: true });
-$('recoverBaseline').onchange = () => saveRecoverConfig({}, { silent: true });
+async function copyTextCompat(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', 'readonly');
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('浏览器不支持自动复制');
+}
 
-loadConfig().then(refreshSlots);
+$('recoverStart').onclick = async () => {
+  if (!window.confirm('确认开始正式恢复？此操作会对目标容器执行真实写入。')) return;
+  return callRecoverApi('start');
+};
+$('recoverStop').onclick = async () => {
+  if (!window.confirm('确认停止当前恢复任务？')) return;
+  if (recoverPollTimer) {
+    clearTimeout(recoverPollTimer);
+    recoverPollTimer = null;
+  }
+  const stoppingJobId = currentRecoverJobId || '';
+  const out = await j('/api/recover/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: stoppingJobId }) });
+  showResult('已请求停止恢复任务', out);
+  if (stoppingJobId) {
+    const latest = await j(`/api/recover/job?id=${encodeURIComponent(stoppingJobId)}`);
+    renderRecoverJob(latest?.job || { jobId: stoppingJobId, status: 'stopped' }, $('recoverJobLog')?.textContent || '任务已停止');
+  }
+};
+$('recoverCopyLog').onclick = async () => {
+  const text = ($('recoverJobLog')?.textContent || '').trim();
+  if (!text || text === '暂无日志') {
+    showResult('当前没有可复制的日志');
+    return;
+  }
+  try {
+    await copyTextCompat(text);
+    showResult('日志已复制到剪贴板');
+  } catch (err) {
+    showResult(`复制失败：${err?.message || err}`);
+  }
+};
+$('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+$('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+$('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+$('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+
+loadConfig().then(refreshSlots).then(attachLatestRecoverJob);

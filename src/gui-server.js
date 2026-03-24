@@ -30,6 +30,50 @@ function jobPaths(jobId) {
   };
 }
 
+function latestJobState() {
+  ensureJobsDir();
+  const files = fs.readdirSync(JOBS_DIR)
+    .filter((x) => x.endsWith('.json'))
+    .map((name) => ({ name, full: path.join(JOBS_DIR, name), mtime: fs.statSync(path.join(JOBS_DIR, name)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  if (!files.length) return null;
+  return readJson(files[0].full, null);
+}
+
+function findRecoverRunPids() {
+  try {
+    const out = execSync("ps -eo pid,args | grep 'node src/index.js recover-run' | grep -v grep", { encoding: 'utf8' });
+    return String(out || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => Number(line.split(/\s+/, 1)[0]))
+      .filter((x) => Number.isFinite(x) && x > 0);
+  } catch {
+    return [];
+  }
+}
+
+function stopRecoverJob(jobId = '') {
+  const pids = findRecoverRunPids();
+  const killed = [];
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      killed.push(pid);
+    } catch {}
+  }
+  const state = jobId ? readJobState(jobId) : latestJobState();
+  if (state) {
+    state.updatedAt = new Date().toISOString();
+    state.status = 'stopped';
+    state.message = '任务已被手动停止';
+    writeJobState(state.jobId, state);
+    appendJobLog(state.jobId, `[${new Date().toISOString()}] 任务已手动停止`);
+  }
+  return { ok: true, killedPids: killed, jobId: state?.jobId || jobId || '' };
+}
+
 function readJobState(jobId) {
   const paths = jobPaths(jobId);
   return readJson(paths.state, null);
@@ -143,7 +187,7 @@ function spawnRecoverJob(jobId, args) {
   child.on('close', (code) => {
     const state = readJobState(jobId) || { jobId, stages: [], logs: [] };
     state.updatedAt = new Date().toISOString();
-    if (state.status !== 'failed') state.status = code === 0 ? (state.status === 'done' ? 'done' : 'finished') : 'failed';
+    if (!['failed', 'stopped'].includes(state.status)) state.status = code === 0 ? (state.status === 'done' ? 'done' : 'finished') : 'failed';
     state.exitCode = code;
     writeJobState(jobId, state);
     appendJobLog(jobId, `[${new Date().toISOString()}] 任务结束 exitCode=${code}`);
@@ -332,6 +376,61 @@ function safeReadJson(file, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function resolveBoxWorkRoot(config = {}) {
+  return config?.recover?.boxWorkRoot || '/mmc/myt_recover_work';
+}
+
+function resolveBoxRecoverWorkspace(config = {}, userId = '') {
+  const root = resolveBoxWorkRoot(config);
+  return {
+    root,
+    taskDir: path.posix.join(root, String(userId || 'unknown')),
+    sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+    remoteMbp: path.posix.join(root, String(userId || 'unknown'), `${userId}.mbp`),
+    extractRoot: path.posix.join(root, String(userId || 'unknown'), 'extract'),
+    appRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'data', 'data', 'com.zhiliaoapp.musically'),
+    cfgDevRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'dev'),
+  };
+}
+
+async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '' }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId);
+  const sourceMbp = String(mbp || '').trim() || ws.sourceMbp;
+  const cmd = [
+    'set -eu',
+    `SRC=${shellQuote(sourceMbp)}`,
+    `TASK_DIR=${shellQuote(ws.taskDir)}`,
+    `REMOTE_MBP=${shellQuote(ws.remoteMbp)}`,
+    `EXTRACT_ROOT=${shellQuote(ws.extractRoot)}`,
+    'if [ ! -f "$SRC" ]; then echo MBP_MISSING=$SRC; exit 21; fi',
+    'mkdir -p "$TASK_DIR"',
+    'cp -f "$SRC" "$REMOTE_MBP"',
+    'rm -rf "$EXTRACT_ROOT"',
+    'mkdir -p "$EXTRACT_ROOT"',
+    'tar -xzf "$REMOTE_MBP" -C "$EXTRACT_ROOT"',
+    `test -d ${shellQuote(ws.appRoot)}`,
+    'echo REMOTE_MBP_READY=1',
+    'echo REMOTE_EXTRACT_ROOT="$EXTRACT_ROOT"',
+  ].join('; ');
+  const out = await runSshCmd(config, cmd);
+  if (!out.ok) {
+    return { ok: false, step: 'prepare-remote-mbp', error: (out.stderr || out.stdout || out.error || 'remote mbp prepare failed').trim(), workspace: ws, sourceMbp };
+  }
+  return { ok: true, workspace: ws, sourceMbp, detail: (out.stdout || '').trim() };
+}
+
+async function cleanupRemoteRecoverWorkspace({ config = {}, userId = '' }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId);
+  const cmd = [
+    'set +e',
+    `TASK_DIR=${shellQuote(ws.taskDir)}`,
+    'if [ -n "$TASK_DIR" ] && [ "$TASK_DIR" != "/" ] && [ -d "$TASK_DIR" ]; then rm -rf "$TASK_DIR"; fi',
+    'echo CLEANED_TASK_DIR="$TASK_DIR"',
+  ].join('; ');
+  const out = await runSshCmd(config, cmd);
+  return { ok: out.ok, workspace: ws, detail: (out.stdout || out.stderr || out.error || '').trim() };
 }
 
 function pickSshRuntime(cfg = {}) {
@@ -931,6 +1030,13 @@ function findAccountSettingBlk(extractRoot) {
   return '';
 }
 
+async function findAccountSettingBlkRemote(remoteAppRoot, cfg) {
+  const remoteKevaDir = path.posix.join(remoteAppRoot, 'files', 'keva', 'repo', 'com.bytedance.sdk.account_setting');
+  const cmd = `find ${shellQuote(remoteKevaDir)} -maxdepth 1 -type f -name '*.blk' | head -n 1`;
+  const out = await runSshCmd(cfg, cmd);
+  return out.ok && out.stdout ? out.stdout.trim() : '';
+}
+
 function extractUserInfoFromAccountSettingBlkText(text, file = '') {
   const raw = String(text || '');
   if (!raw.trim()) return {};
@@ -1089,132 +1195,88 @@ async function prepareLocalDetectArtifacts(userId, cfg = {}, preferredSource = '
   const extractDir = path.join(taskDir, 'extract');
   const localSourceMbp = path.join(taskDir, `${userId}.mbp`);
   ensureDir(taskDir);
+  ensureDir(extractDir);
 
-  const prepared = await runBoxPrepareDetectBundle(cfg, userId, preferredTargetName, preferredSlot);
-  if (!prepared.ok) {
-    let errorMsg = prepared.error || '未知错误';
-    if (prepared.sourceMissing) {
-      const roots = Array.isArray(prepared.searchedRoots) && prepared.searchedRoots.length ? `（已搜索: ${prepared.searchedRoots.join(', ')})` : '';
-      errorMsg = `找不到 MBP 文件${roots}`;
-    } else if (String(prepared.error || '').includes('ssh disabled')) {
-      errorMsg = '未启用 SSH，无法从盒子读取 MBP';
-    } else {
-      errorMsg = `盒子连接异常: ${prepared.error || 'SSH连接失败'}`;
-    }
+  const ws = resolveBoxRecoverWorkspace(cfg, userId);
+  const sourceMbp = String(preferredSource || '').trim() || ws.sourceMbp;
+  const ssh = pickSshRuntime(cfg);
+
+  if (!ssh.enabled) {
     return {
       ok: false,
-      sourceMissing: Boolean(prepared.sourceMissing),
-      sourceMbp: prepared.sourceMbp || path.posix.join('/mmc/mbp', `${userId}.mbp`),
+      sourceMissing: false,
+      sourceMbp,
       localSourceMbp: '',
       backupMbp: '',
       extractDir,
-      remoteExtractDir: prepared.remoteExtractDir || '',
-      remoteFiles: prepared.remoteFiles || {},
-      ssh: prepared.ssh || pickSshRuntime(cfg),
-      error: `准备检测环境失败: ${errorMsg}`,
+      remoteExtractDir: '',
+      remoteFiles: {},
+      ssh,
+      error: '准备检测环境失败: 未启用 SSH，无法在盒子侧准备 MBP 工作目录',
     };
   }
 
-  const copied = await scpFromBox(cfg, prepared.sourceMbp, localSourceMbp);
-  if (!copied.ok) {
+  const prepared = await prepareRemoteMbpArtifacts({ config: cfg, userId, mbp: sourceMbp });
+  if (!prepared.ok) {
+    const missing = /MBP_MISSING=/.test(prepared.error || '') || /No such file/i.test(prepared.error || '');
     return {
       ok: false,
-      sourceMissing: false,
-      sourceMbp: prepared.sourceMbp,
-      localSourceMbp,
-      backupMbp: localSourceMbp,
+      sourceMissing: missing,
+      sourceMbp: prepared.sourceMbp || sourceMbp,
+      localSourceMbp: '',
+      backupMbp: '',
       extractDir,
-      remoteExtractDir: '',
+      remoteExtractDir: prepared?.workspace?.extractRoot || '',
       remoteFiles: {},
-      ssh: prepared.ssh || pickSshRuntime(cfg),
-      error: `复制 MBP 到工作目录失败: ${(copied.stderr || copied.stdout || copied.error || 'scp failed').trim()}`,
+      ssh,
+      error: `准备检测环境失败: ${prepared.error || '盒子侧 MBP 准备失败'}`,
     };
   }
 
-  const extracted = await extractLocalMbp(localSourceMbp, extractDir);
-  if (!extracted.ok) {
-    return {
-      ok: false,
-      sourceMissing: false,
-      sourceMbp: prepared.sourceMbp,
-      localSourceMbp,
-      backupMbp: localSourceMbp,
-      extractDir,
-      remoteExtractDir: '',
-      remoteFiles: {},
-      ssh: prepared.ssh || pickSshRuntime(cfg),
-      error: `MBP 拆包失败，可能是版本/结构不兼容: ${(extracted.stderr || extracted.stdout || extracted.error || 'extract failed').trim()}`,
-    };
+  const remoteExtractDir = prepared.workspace.extractRoot;
+  const remoteAppRoot = prepared.workspace.appRoot;
+  const remoteCfgDevRoot = prepared.workspace.cfgDevRoot;
+  const remoteFiles = {};
+
+  const findCfgDirOut = await runSshCmd(cfg, `find ${shellQuote(remoteCfgDevRoot)} -maxdepth 1 -type d -name '.cfg-*' | head -n 1`);
+  const remoteCfgDir = findCfgDirOut.ok ? String(findCfgDirOut.stdout || '').trim() : '';
+  const remoteBlk = await findAccountSettingBlkRemote(remoteAppRoot, cfg);
+
+  const candidates = [
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'cfg.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'baseCfg.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'location.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'device_info.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'pif.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'telephone.json') : '',
+    remoteCfgDir ? path.posix.join(remoteCfgDir, 'gsms.json') : '',
+    path.posix.join(remoteAppRoot, 'shared_prefs', 'aweme_user.xml'),
+    path.posix.join(remoteAppRoot, 'shared_prefs', 'ttnetCookieStore.xml'),
+    remoteBlk,
+  ].filter(Boolean);
+
+  for (const remotePath of candidates) {
+    const rel = remotePath.startsWith(remoteExtractDir) ? remotePath.slice(remoteExtractDir.length).replace(/^\/+/, '') : path.posix.basename(remotePath);
+    const localPath = path.join(extractDir, rel.split('/').join(path.sep));
+    ensureDir(path.dirname(localPath));
+    const pulled = await scpFromBox(cfg, remotePath, localPath);
+    if (pulled.ok) {
+      remoteFiles[remotePath] = localPath;
+    }
   }
 
   return {
     ok: true,
-    sourceMbp: prepared.sourceMbp,
+    sourceMbp: prepared.sourceMbp || sourceMbp,
     localSourceMbp,
-    backupMbp: localSourceMbp,
+    backupMbp: prepared.workspace.remoteMbp,
     backupOk: true,
     backupError: '',
     extractDir,
-    fetchMode: 'box-ssh-local-extract',
-    remoteExtractDir: '',
-    remoteFiles: {},
-    ssh: prepared.ssh || pickSshRuntime(cfg),
-  };
-}
-
-async function readDetectData(userId, cfg = {}, prepared = {}, preferredTargetName = '', preferredSlot = '') {
-  const extractDir = prepared.extractDir || '';
-  const cfgDir = findCfgDir(extractDir) || '';
-
-  const files = {
-    cfgJson: cfgDir ? path.join(cfgDir, 'cfg.json') : '',
-    location: cfgDir ? path.join(cfgDir, 'location.json') : '',
-    baseCfg: cfgDir ? path.join(cfgDir, 'baseCfg.json') : '',
-    deviceInfo: cfgDir ? path.join(cfgDir, 'device_info.json') : '',
-    gsms: cfgDir ? path.join(cfgDir, 'gsms.json') : '',
-    pif: cfgDir ? path.join(cfgDir, 'pif.json') : '',
-    telephone: cfgDir ? path.join(cfgDir, 'telephone.json') : '',
-    awemeUserXml: path.join(extractDir, 'data', 'data', 'com.zhiliaoapp.musically', 'shared_prefs', 'aweme_user.xml'),
-    accountSettingBlk: findAccountSettingBlk(extractDir) || '',
-    cookieStoreXml: path.join(extractDir, 'data', 'data', 'com.zhiliaoapp.musically', 'shared_prefs', 'ttnetCookieStore.xml'),
-  };
-
-  const awemeUserText = files.awemeUserXml ? safeReadText(files.awemeUserXml, '') : '';
-  const accountSettingText = files.accountSettingBlk ? safeReadText(files.accountSettingBlk, '') : '';
-  const awemeUser = extractUserInfoFromAwemeUserXmlText(awemeUserText, files.awemeUserXml || '');
-  const accountSetting = extractUserInfoFromAccountSettingBlkText(accountSettingText, files.accountSettingBlk || '');
-
-  const detected = mapDetectedFromLocalData({
-    userId,
-    cfg,
-    sourceMbp: prepared.sourceMbp,
-    taskDir: path.dirname(prepared.localSourceMbp || extractDir),
-    workingMbp: prepared.localSourceMbp || '',
-    extractDir,
-    cfgDir,
-    cfgJson: safeReadJson(files.cfgJson, {}) || {},
-    location: safeReadJson(files.location, {}) || {},
-    baseCfg: safeReadJson(files.baseCfg, {}) || {},
-    deviceInfo: safeReadJson(files.deviceInfo, {}) || {},
-    gsms: safeReadJson(files.gsms, []) || [],
-    pif: safeReadJson(files.pif, {}) || {},
-    telephone: safeReadJson(files.telephone, {}) || {},
-    awemeUser,
-    accountSetting,
-  });
-
-  return {
-    ok: true,
-    detected,
-    diag: {
-      cfgDir,
-      files,
-      cfgDirOk: Boolean(cfgDir),
-      awemeUserXmlOk: Boolean(files.awemeUserXml && fs.existsSync(files.awemeUserXml)),
-      localSourceMbp: prepared.localSourceMbp || '',
-      fetchMode: prepared.fetchMode || '',
-      ssh: prepared.ssh || null,
-    },
+    fetchMode: 'box-workdir-server-analysis',
+    remoteExtractDir,
+    remoteFiles,
+    ssh,
   };
 }
 
@@ -1434,12 +1496,39 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, job: state });
   }
 
+  if (req.method === 'GET' && u.pathname === '/api/recover/latest') {
+    ensureJobsDir();
+    const files = fs.readdirSync(JOBS_DIR)
+      .filter((x) => x.endsWith('.json'))
+      .map((name) => ({ name, full: path.join(JOBS_DIR, name), mtime: fs.statSync(path.join(JOBS_DIR, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (!files.length) return send(res, 404, { ok: false, error: 'no jobs found' });
+    const latest = readJson(files[0].full, null);
+    if (!latest) return send(res, 404, { ok: false, error: 'latest job unreadable' });
+    return send(res, 200, { ok: true, job: latest });
+  }
+
   if (req.method === 'GET' && u.pathname === '/api/recover/log') {
     const jobId = String(u.searchParams.get('id') || '').trim();
     if (!jobId) return send(res, 400, { ok: false, error: 'missing job id' });
     const paths = jobPaths(jobId);
     if (!fs.existsSync(paths.log)) return send(res, 404, { ok: false, error: 'log not found' });
     return send(res, 200, { ok: true, jobId, log: fs.readFileSync(paths.log, 'utf8') });
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/recover/stop') {
+    let raw = '';
+    req.on('data', (d) => raw += d.toString());
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(raw || '{}');
+        const out = stopRecoverJob(String(body.jobId || '').trim());
+        send(res, 200, out);
+      } catch (err) {
+        send(res, 400, { ok: false, error: err.message });
+      }
+    });
+    return;
   }
 
   if (req.method === 'POST' && u.pathname === '/api/recover/dryrun') {

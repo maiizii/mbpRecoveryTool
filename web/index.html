@@ -71,6 +71,10 @@
               <select id="recoverDetectedUser"></select>
             </div>
             <div>
+              <label>选择基座</label>
+              <select id="recoverBaseline"></select>
+            </div>
+            <div>
               <label>选择机位</label>
               <select id="recoverSlot"></select>
             </div>
@@ -78,9 +82,9 @@
               <label>选择容器</label>
               <select id="recoverTargetName"></select>
             </div>
-            <div>
-              <label>选择基座</label>
-              <select id="recoverBaseline"></select>
+            <div class="full">
+              <label>匹配提示</label>
+              <div id="recoverMatchHint" class="summary muted">匹配提示：请先选择基座和容器</div>
             </div>
             <div class="full">
               <label>当前目标容器</label>
@@ -88,19 +92,30 @@
             </div>
           </div>
           <div class="actions topgap">
-            <button id="saveRecoverConfig" class="secondary">保存恢复配置</button>
-            <button id="recoverPrecheck" class="secondary">恢复预检</button>
-            <button id="recoverPlan" class="warn">生成恢复计划</button>
-            <button id="recoverDryRun" class="danger">执行 Dry-Run</button>
-            <button id="recoverStart" class="danger">开始恢复</button>
+            <button id="recoverStart" class="danger">开始正式恢复（真执行）</button>
+            <button id="recoverStop" class="warn">停止当前任务</button>
+            <button id="recoverAttachLatest" class="secondary">查看最新任务</button>
           </div>
-          <div class="muted topgap">当前先把恢复前置选择项收好：用户 → 机位 → 容器 → 基座。</div>
+          <div class="summary muted topgap">推荐用法：上面四项选好后，直接点【开始正式恢复（真执行）】。下方会实时滚动显示任务日志。</div>
+          <details class="topgap">
+            <summary>高级工具（平时不用）</summary>
+            <div class="actions topgap">
+              <button id="saveRecoverConfig" class="secondary">保存当前选择</button>
+              <button id="recoverPrecheck" class="secondary">仅做预检</button>
+              <button id="recoverPlan" class="warn">仅生成计划</button>
+              <button id="recoverDryRun" class="secondary">仅跑 Dry-Run</button>
+            </div>
+            <div class="summary muted topgap">按钮说明：保存当前选择=只记住参数；仅做预检=检查必要条件；仅生成计划=看计划不执行；仅跑 Dry-Run=模拟流程不落地。正式恢复只用最上面的主按钮。</div>
+          </details>
           <div class="panel topgap">
             <h3>恢复执行状态</h3>
             <div id="recoverJobSummary" class="summary muted">尚未启动恢复任务</div>
             <div id="recoverStageList" class="summary muted topgap">暂无阶段信息</div>
             <details open class="topgap">
-              <summary>滚动日志</summary>
+              <summary>滚动日志（自动刷新）</summary>
+              <div class="actions topgap">
+                <button id="recoverCopyLog" class="secondary">复制当前日志</button>
+              </div>
               <pre id="recoverJobLog">暂无日志</pre>
             </details>
           </div>

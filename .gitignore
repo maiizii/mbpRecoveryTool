@@ -10,6 +10,8 @@ config.json
 /tmp/**
 /release/*.zip
 /release/*.mbp
+/data/*.xlsx
+*.bak-*
 
 # runtime artifacts
 *.pid
