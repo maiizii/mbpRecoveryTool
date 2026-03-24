@@ -25,6 +25,7 @@ MYT 小包恢复工具的首个正式完成版。
 详细说明见：
 
 - `docs/RECOVERY-WEB-V1-FULL-FLOW-v1.0.0.md`
+- `RELEASE-NOTES-1.0.1.md`
 - `RELEASE-NOTES-1.0.0.md`
 
 ---

@@ -98,6 +98,11 @@ function createRecoverJob(payload = {}) {
     updatedAt: new Date().toISOString(),
     status: 'queued',
     currentStage: null,
+    targetName: payload.targetName || payload.target || null,
+    slot: payload.slot != null && payload.slot !== '' ? String(payload.slot) : null,
+    userId: payload.userId || null,
+    baseline: payload.baseline || null,
+    mbp: payload.mbp || null,
     payload,
     stages: [],
     logs: [],
@@ -121,6 +126,11 @@ function consumeRecoverEventLine(line = '') {
 function updateJobFromEvent(jobId, event) {
   const state = readJobState(jobId) || { jobId, createdAt: new Date().toISOString(), stages: [], logs: [], payload: {} };
   state.updatedAt = new Date().toISOString();
+  if (event.targetName) state.targetName = event.targetName;
+  if (event.slot != null && event.slot !== '') state.slot = String(event.slot);
+  if (event.userId) state.userId = event.userId;
+  if (event.baseline) state.baseline = event.baseline;
+  if (event.mbp) state.mbp = event.mbp;
   if (event.type === 'job') {
     state.status = event.status || state.status;
     if (event.message) state.message = event.message;
@@ -1348,10 +1358,12 @@ function buildRecoverArgs(configPath, mode, body = {}) {
   const cfg = readJson(configPath, {});
   const args = [mode, `--config=${configPath}`];
   const targetName = body.targetName || body.target || cfg?.recover?.targetName || '';
+  const slot = body.slot != null && body.slot !== '' ? body.slot : (cfg?.recover?.slot || '');
   const baseline = body.baseline || cfg?.recover?.baseline || '';
   const mbp = resolveRecoverMbp(cfg, body);
   const userId = body.userId || cfg?.recover?.userId || '';
   if (targetName) args.push(`--target-name=${targetName}`);
+  if (slot != null && String(slot).trim() !== '') args.push(`--slot=${String(slot).trim()}`);
   if (baseline) args.push(`--baseline=${baseline}`);
   if (mbp) args.push(`--mbp=${mbp}`);
   if (userId) args.push(`--user-id=${userId}`);

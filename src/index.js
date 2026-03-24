@@ -127,6 +127,21 @@ function getNested(obj, keys, fallback = null) {
   return cur;
 }
 
+function resolveVpcId(config = {}) {
+  const candidates = [
+    getNested(config, ['recover', 'vpcID'], null),
+    getNested(config, ['recover', 'vpcId'], null),
+    getNested(config, ['vpc', 'id'], null),
+    config?.defaultVpcId,
+  ];
+  for (const value of candidates) {
+    if (value == null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 300;
+}
+
 function withPort(base, port) {
   const u = new URL(base);
   u.port = String(port);
@@ -1068,13 +1083,16 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
       report.overrides = resolveEndpointOverrides(config, targetName);
       report.checks.push({ item: 'targetExists', ok: true, note: `${target.name} (${target.status})` });
       report.checks.push({ item: 'targetState', ok: ['running', 'exited'].includes(target.status), note: `当前状态 ${target.status}` });
-      report.checks.push({ item: 'instanceApiOverride', ok: !!report.overrides.instanceApi, note: report.overrides.instanceApi || '缺少实例 API 覆盖' });
-      report.checks.push({ item: 'rpaOverride', ok: !!(report.overrides.rpaHost && report.overrides.rpaPort), note: report.overrides.rpaHost && report.overrides.rpaPort ? `${report.overrides.rpaHost}:${report.overrides.rpaPort}` : '缺少 RPA 覆盖' });
 
       const baseUrl = new URL(boxBase);
       let resolvedApi = report.overrides.instanceApi || null;
       let resolvedRpaHost = report.overrides.rpaHost || null;
       let resolvedRpaPort = report.overrides.rpaPort ? Number(report.overrides.rpaPort) : null;
+      if (!resolvedApi && target.api) resolvedApi = withPort(baseUrl.toString(), target.api);
+      if (!resolvedRpaHost && target.rpa) resolvedRpaHost = baseUrl.hostname;
+      if (!resolvedRpaPort && target.rpa) resolvedRpaPort = Number(target.rpa);
+      report.checks.push({ item: 'instanceApiRoute', ok: !!resolvedApi, note: resolvedApi || '未解析出实例 API 地址' });
+      report.checks.push({ item: 'rpaRoute', ok: !!(resolvedRpaHost && resolvedRpaPort), note: resolvedRpaHost && resolvedRpaPort ? `${resolvedRpaHost}:${resolvedRpaPort}` : '未解析出 RPA 地址' });
       if (!resolvedApi && target.api) resolvedApi = withPort(baseUrl.toString(), target.api);
       if (!resolvedRpaHost && target.rpa) resolvedRpaHost = baseUrl.hostname;
       if (!resolvedRpaPort && target.rpa) resolvedRpaPort = Number(target.rpa);
@@ -1300,7 +1318,7 @@ async function runRecoverPlan({ boxBase, targetName, config, baseline, mbp, user
   console.log(JSON.stringify(report, null, 2));
 }
 
-async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, dryRun = true }) {
+async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, userId, dryRun = true }) {
   const pre = await buildPrecheckReport({ boxBase, targetName, config, baseline, mbp, userId });
   mbp = pre.mbp || mbp;
   const report = {
@@ -1347,11 +1365,11 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
   if (!pre.summary.ok) report.blockers.push('precheck 未通过，不能进入恢复执行');
   report.risks = [...(pre.risks || [])];
 
-  emit({ type: 'job', status: 'started', dryRun, targetName, userId, baseline, mbp });
+  emit({ type: 'job', status: 'started', dryRun, targetName, slot, userId, baseline, mbp });
 
   if (dryRun || report.blockers.length) {
     if (report.blockers.length) report.message = '前置检查未通过，当前仅返回计划';
-    emit({ type: 'job', status: 'blocked', blockers: report.blockers, risks: report.risks || [], precheck: pre.summary, plan });
+    emit({ type: 'job', status: 'blocked', targetName, slot, userId, baseline, mbp, blockers: report.blockers, risks: report.risks || [], precheck: pre.summary, plan });
     printRecoverPlanSummary(report);
     console.log(JSON.stringify({ ...report, precheckReport: pre }, null, 2));
     return;
@@ -1513,11 +1531,27 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
       if (!vpcRow?.result?.ok) {
         throw new Error(`VPC 阶段失败：盒子 /mytVpc/group 不可用 (${vpcRow?.result?.error || 'no response'})`);
       }
-      const status = vpcRow?.result?.status || '-';
-      log(`VPC 阶段：盒子 /mytVpc/group 连通，http=${status}`);
+      const vpcID = resolveVpcId(config);
+      const addRuleUrl = `${boxBase.replace(/\/$/, '')}/mytVpc/addRule`;
+      const addRuleResp = await postJson(addRuleUrl, { name: targetName, vpcID });
+      if (!addRuleResp?.ok || (addRuleResp?.json && addRuleResp.json.code !== 0)) {
+        throw new Error(`VPC 阶段失败：addRule 失败 (${addRuleResp?.body || addRuleResp?.error || 'unknown error'})`);
+      }
+      const ruleUrl = `${boxBase.replace(/\/$/, '')}/mytVpc/containerRule?name=${encodeURIComponent(targetName)}`;
+      const ruleResp = await requestJson(ruleUrl);
+      if (!ruleResp?.ok || (ruleResp?.json && ruleResp.json.code !== 0)) {
+        throw new Error(`VPC 阶段失败：containerRule 校验失败 (${ruleResp?.body || ruleResp?.error || 'unknown error'})`);
+      }
+      const matched = Array.isArray(ruleResp?.json?.data?.list)
+        ? ruleResp.json.data.list.find((x) => x?.containerName === targetName)
+        : null;
+      if (!matched) {
+        throw new Error(`VPC 阶段失败：未在 containerRule 中看到 ${targetName} 的规则`);
+      }
+      log(`VPC 阶段：已绑定 ${targetName} -> ${matched.groupName || '-'} (vpcID=${vpcID})`);
       return {
-        detail: `VPC 阶段已接入真实检查：/mytVpc/group 可达（http=${status}）`,
-        check: { path: '/mytVpc/group', httpStatus: status },
+        detail: `VPC 已真实绑定并回读确认：${matched.groupName || '-'} (vpcID=${vpcID})`,
+        check: { path: '/mytVpc/addRule', verifyPath: '/mytVpc/containerRule', vpcID, groupName: matched.groupName || null, vpcRemarks: matched.vpcRemarks || null },
       };
     });
 
@@ -1658,11 +1692,11 @@ async function runRecover({ boxBase, targetName, config, baseline, mbp, userId, 
     });
 
     report.message = '恢复任务阶段流已跑通（S5 已接入映射表自动反查 + 真实写入 + 回读校验）';
-    emit({ type: 'job', status: 'done', message: report.message });
+    emit({ type: 'job', status: 'done', targetName, slot, userId, baseline, mbp, message: report.message });
     log(`任务完成：${report.message}`);
   } catch (err) {
     report.message = String(err?.message || err || '恢复失败');
-    emit({ type: 'job', status: 'failed', message: report.message });
+    emit({ type: 'job', status: 'failed', targetName, slot, userId, baseline, mbp, message: report.message });
     log(`任务失败：${report.message}`);
   } finally {
     await cleanupRemoteRecoverWorkspace({ config, userId, log });
@@ -1730,17 +1764,17 @@ async function main() {
   }
 
   if (mode === 'recover') {
-    await runRecover({ boxBase, targetName, config, baseline, mbp, userId, dryRun: true });
+    await runRecover({ boxBase, targetName, slot, config, baseline, mbp, userId, dryRun: true });
     return;
   }
 
   if (mode === 'recover-dryrun') {
-    await runRecover({ boxBase, targetName, config, baseline, mbp, userId, dryRun: true });
+    await runRecover({ boxBase, targetName, slot, config, baseline, mbp, userId, dryRun: true });
     return;
   }
 
   if (mode === 'recover-run') {
-    await runRecover({ boxBase, targetName, config, baseline, mbp, userId, dryRun: false });
+    await runRecover({ boxBase, targetName, slot, config, baseline, mbp, userId, dryRun: false });
     return;
   }
 
