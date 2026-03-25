@@ -145,10 +145,27 @@ export function upsertConnection(config = {}, input = {}) {
   return { config: next, connection: row };
 }
 
+export function getConnectionById(config = {}, connectionId = '') {
+  const id = String(connectionId || '').trim();
+  const list = Array.isArray(config?.ssh?.connections) ? config.ssh.connections : [];
+  return list.find((x) => String(x.id || '') === id) || null;
+}
+
 export function getActiveConnection(config = {}) {
   const activeId = String(config?.ssh?.activeConnectionId || '').trim();
-  const list = Array.isArray(config?.ssh?.connections) ? config.ssh.connections : [];
-  return list.find((x) => String(x.id || '') === activeId) || null;
+  return getConnectionById(config, activeId);
+}
+
+export function deleteConnection(config = {}, connectionId = '') {
+  const id = String(connectionId || '').trim();
+  const next = mergeConfig(createDefaultConfig(), config || {});
+  const list = Array.isArray(next.ssh.connections) ? next.ssh.connections.slice() : [];
+  const hit = list.find((x) => String(x.id || '') === id) || null;
+  next.ssh.connections = list.filter((x) => String(x.id || '') !== id);
+  if (String(next.ssh.activeConnectionId || '') === id) {
+    next.ssh.activeConnectionId = next.ssh.connections[0]?.id || '';
+  }
+  return { config: next, deleted: hit };
 }
 
 export function writePrivateKey({ connectionId, privateKey, sshSecretsDir = DEFAULT_SSH_SECRETS_DIR }) {

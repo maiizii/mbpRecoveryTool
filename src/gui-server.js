@@ -16,10 +16,12 @@ import {
   ensureDir as ensureStoreDir,
   generateConnectionId,
   getActiveConnection,
+  getConnectionById,
   listConnections,
   loadAppConfig,
   saveAppConfig,
   upsertConnection,
+  deleteConnection,
   writePrivateKey,
 } from './config-store.js';
 
@@ -1543,8 +1545,11 @@ const server = http.createServer(async (req, res) => {
       if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
       if (!privateKey) return send(res, 400, { ok: false, error: 'missing privateKey' });
       const current = getStoredConfig();
+      const existing = getConnectionById(current, connectionId);
+      if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
       const result = writePrivateKey({ connectionId, privateKey });
       const { config: next } = upsertConnection(current, {
+        ...existing,
         id: connectionId,
         privateKeyPath: result.path,
         privateKeyFingerprint: result.fingerprint,
@@ -1557,6 +1562,21 @@ const server = http.createServer(async (req, res) => {
         fingerprint: result.fingerprint,
         config: getPublicConfig(),
       });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection/delete') {
+    try {
+      const body = await parseJsonBody(req);
+      const connectionId = String(body.connectionId || body.id || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+      const current = getStoredConfig();
+      const { config: next, deleted } = deleteConnection(current, connectionId);
+      if (!deleted) return send(res, 404, { ok: false, error: 'connection not found' });
+      saveAppConfig(next, CONFIG_PATH);
+      return send(res, 200, { ok: true, connectionId, config: getPublicConfig() });
     } catch (err) {
       return send(res, 400, { ok: false, error: err.message });
     }

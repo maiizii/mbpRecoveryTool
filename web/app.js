@@ -300,6 +300,7 @@ function renderConnectionList(cfg = {}) {
         <div class="actions">
           <button class="secondary" data-conn-action="edit" data-conn-id="${x.id}">编辑回填</button>
           <button class="secondary" data-conn-action="activate" data-conn-id="${x.id}">设为当前</button>
+          <button class="danger" data-conn-action="delete" data-conn-id="${x.id}">删除</button>
         </div>
       </div>
     `).join('');
@@ -367,6 +368,23 @@ function bindConnectionListActions() {
   });
   document.querySelectorAll('button[data-conn-action="activate"]').forEach((btn) => {
     btn.onclick = () => activateConnectionById(btn.dataset.connId);
+  });
+  document.querySelectorAll('button[data-conn-action="delete"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const connectionId = String(btn.dataset.connId || '').trim();
+      if (!connectionId) return;
+      if (!window.confirm('确认删除这个盒子记录吗？')) return;
+      const out = await j('/api/settings/ssh-connection/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ connectionId }),
+      });
+      await loadConfig();
+      showResult('盒子记录已删除', out);
+      const currentFormId = String($('sshConnId')?.value || '').trim();
+      if (currentFormId && currentFormId === connectionId) fillSshForm(null);
+      await refreshSlots();
+    };
   });
 }
 
