@@ -1705,7 +1705,7 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
 
 async function main() {
   const mode = process.argv[2] || 'probe';
-  const configPath = pickArg('config', path.resolve(process.cwd(), 'config.json'));
+  const configPath = pickArg('config', process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json'));
   const config = getConfig(configPath);
   const boxBase = process.env.MYT_BASE || pickArg('base', config.boxBase || 'http://127.0.0.1:30201');
   const instanceApi = process.env.MYT_INSTANCE_API || pickArg('instance-api', '');

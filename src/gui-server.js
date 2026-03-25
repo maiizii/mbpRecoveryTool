@@ -1,22 +1,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import https from 'node:https';
+import crypto from 'node:crypto';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_BOX_WORK_ROOT,
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_DATA_DIR,
+  DEFAULT_JOBS_DIR,
+  DEFAULT_UPLOADS_DIR,
+  applyActiveConnection,
+  ensureDir as ensureStoreDir,
+  generateConnectionId,
+  getActiveConnection,
+  listConnections,
+  loadAppConfig,
+  saveAppConfig,
+  upsertConnection,
+  writePrivateKey,
+} from './config-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const WEB_DIR = path.join(ROOT, 'web');
-const CONFIG_PATH = path.join(ROOT, 'config.json');
+const CONFIG_PATH = DEFAULT_CONFIG_PATH;
+const DATA_DIR = DEFAULT_DATA_DIR;
 const BASE_PORT = Number(process.env.PORT || 23321);
-const DEFAULT_BOX_WORK_ROOT = '/mmc/myt_recover_work';
-const DEFAULT_SSH_HOST = 'mylo.gote.top';
-const DEFAULT_SSH_PORT = 23191;
-const DEFAULT_SSH_USER = 'root';
-const DEFAULT_SSH_KEY = '/root/.ssh/MYT1_ed25519';
-const JOBS_DIR = path.join(ROOT, 'tmp', 'recover-jobs');
+const JOBS_DIR = DEFAULT_JOBS_DIR;
+const UPLOADS_DIR = DEFAULT_UPLOADS_DIR;
 
 function ensureJobsDir() {
   fs.mkdirSync(JOBS_DIR, { recursive: true });
@@ -213,13 +228,85 @@ function readJson(file, fallback = {}) {
 }
 
 function writeJson(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+}
+
+function getStoredConfig() {
+  return loadAppConfig(CONFIG_PATH);
+}
+
+function getRuntimeConfig() {
+  return applyActiveConnection(getStoredConfig());
+}
+
+function getPublicConfig() {
+  const cfg = getStoredConfig();
+  const active = getActiveConnection(cfg);
+  return {
+    ...cfg,
+    ssh: {
+      ...cfg.ssh,
+      host: '',
+      port: cfg.ssh?.port || '',
+      user: '',
+      key: '',
+      connections: listConnections(cfg),
+      activeConnectionId: cfg.ssh?.activeConnectionId || '',
+      activeConnection: active ? {
+        id: active.id,
+        name: active.name,
+        sshHost: active.sshHost,
+        sshPort: active.sshPort,
+        sshUser: active.sshUser,
+        boxBase: active.boxBase,
+        boxWorkRoot: active.boxWorkRoot,
+        privateKeyPath: active.privateKeyPath ? 'configured' : '',
+        privateKeyFingerprint: active.privateKeyFingerprint || '',
+        hasPrivateKey: Boolean(active.privateKeyPath),
+        updatedAt: active.updatedAt || '',
+      } : null,
+    },
+    runtime: {
+      configPath: CONFIG_PATH,
+      dataDir: DATA_DIR,
+      jobsDir: JOBS_DIR,
+      uploadsDir: UPLOADS_DIR,
+    },
+  };
+}
+
+function parseJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (d) => raw += d.toString());
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(raw || '{}'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function mergeAndSaveConfig(patch = {}) {
+  const current = getStoredConfig();
+  const next = {
+    ...current,
+    ...(patch || {}),
+    ssh: { ...(current.ssh || {}), ...((patch || {}).ssh || {}) },
+    recover: { ...(current.recover || {}), ...((patch || {}).recover || {}) },
+    targets: { ...(current.targets || {}), ...((patch || {}).targets || {}) },
+  };
+  return saveAppConfig(next, CONFIG_PATH);
 }
 
 function requestText(target, { method = 'GET', timeout = 5000 } = {}) {
   return new Promise((resolve) => {
     const u = new URL(target);
-    const lib = u.protocol === 'https:' ? require('node:https') : http;
+    const lib = u.protocol === 'https:' ? https : http;
     const req = lib.request(
       u,
       { method, timeout, headers: { accept: 'application/json,text/plain,*/*' } },
@@ -444,14 +531,16 @@ async function cleanupRemoteRecoverWorkspace({ config = {}, userId = '' }) {
 }
 
 function pickSshRuntime(cfg = {}) {
-  const ssh = cfg?.ssh || {};
-  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1';
+  const runtimeCfg = applyActiveConnection(cfg || {});
+  const ssh = runtimeCfg?.ssh || {};
+  const active = getActiveConnection(cfg || {});
+  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1' || Boolean(active?.privateKeyPath);
   return {
     enabled,
-    host: String(ssh.host || process.env.MYT_BOX_SSH_HOST || DEFAULT_SSH_HOST).trim(),
-    port: Number(ssh.port || process.env.MYT_BOX_SSH_PORT || DEFAULT_SSH_PORT),
-    user: String(ssh.user || process.env.MYT_BOX_SSH_USER || DEFAULT_SSH_USER).trim(),
-    key: String(ssh.key || process.env.MYT_BOX_SSH_KEY || DEFAULT_SSH_KEY).trim(),
+    host: String(ssh.host || active?.sshHost || process.env.MYT_BOX_SSH_HOST || '').trim(),
+    port: Number(ssh.port || active?.sshPort || process.env.MYT_BOX_SSH_PORT || 22),
+    user: String(ssh.user || active?.sshUser || process.env.MYT_BOX_SSH_USER || 'root').trim(),
+    key: String(ssh.key || active?.privateKeyPath || process.env.MYT_BOX_SSH_KEY || '').trim(),
   };
 }
 
@@ -1377,25 +1466,100 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && u.pathname === '/app.js') return serveStatic(res, path.join(WEB_DIR, 'app.js'));
   if (req.method === 'GET' && u.pathname === '/style.css') return serveStatic(res, path.join(WEB_DIR, 'style.css'));
 
+  if (req.method === 'GET' && u.pathname === '/healthz') {
+    ensureStoreDir(DATA_DIR);
+    ensureJobsDir();
+    ensureStoreDir(UPLOADS_DIR);
+    return send(res, 200, {
+      ok: true,
+      status: 'ok',
+      configPath: CONFIG_PATH,
+      dataDir: DATA_DIR,
+      jobsDir: JOBS_DIR,
+      uploadsDir: UPLOADS_DIR,
+    });
+  }
+
   if (req.method === 'GET' && u.pathname === '/api/config') {
-    return send(res, 200, readJson(CONFIG_PATH, {
-      boxBase: '', sdkDir: '', targets: {}, recover: { boxWorkRoot: DEFAULT_BOX_WORK_ROOT },
-    }));
+    return send(res, 200, getPublicConfig());
   }
 
   if (req.method === 'POST' && u.pathname === '/api/config') {
-    let raw = '';
-    req.on('data', (d) => raw += d.toString());
-    req.on('end', () => {
-      try {
-        const body = JSON.parse(raw || '{}');
-        writeJson(CONFIG_PATH, body);
-        send(res, 200, { ok: true, config: body });
-      } catch (err) {
-        send(res, 400, { ok: false, error: err.message });
-      }
-    });
-    return;
+    try {
+      const body = await parseJsonBody(req);
+      const saved = saveAppConfig(body, CONFIG_PATH);
+      return send(res, 200, { ok: true, config: getPublicConfig(), savedVersion: saved.version || 2 });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/general') {
+    try {
+      const body = await parseJsonBody(req);
+      const patch = {
+        boxBase: String(body.boxBase || '').trim(),
+        sdkDir: String(body.sdkDir || '').trim(),
+        recover: {
+          boxWorkRoot: String(body.boxWorkRoot || DEFAULT_BOX_WORK_ROOT).trim() || DEFAULT_BOX_WORK_ROOT,
+          baselineOptions: Array.isArray(body.baselineOptions) ? body.baselineOptions : [],
+          baseline: String(body.baseline || '').trim(),
+          proxyMappingFile: String(body.proxyMappingFile || '').trim(),
+        },
+      };
+      mergeAndSaveConfig(patch);
+      return send(res, 200, { ok: true, config: getPublicConfig() });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection') {
+    try {
+      const body = await parseJsonBody(req);
+      const current = getStoredConfig();
+      const { config: next, connection } = upsertConnection(current, {
+        id: String(body.id || '').trim() || generateConnectionId(),
+        name: String(body.name || '').trim(),
+        sshHost: String(body.sshHost || '').trim(),
+        sshPort: Number(body.sshPort || 22) || 22,
+        sshUser: String(body.sshUser || 'root').trim() || 'root',
+        boxBase: String(body.boxBase || '').trim(),
+        boxWorkRoot: String(body.boxWorkRoot || '').trim(),
+      });
+      if (body.setActive !== false) next.ssh.activeConnectionId = connection.id;
+      saveAppConfig(next, CONFIG_PATH);
+      return send(res, 200, { ok: true, connectionId: connection.id, config: getPublicConfig() });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-private-key') {
+    try {
+      const body = await parseJsonBody(req);
+      const connectionId = String(body.connectionId || '').trim();
+      const privateKey = String(body.privateKey || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+      if (!privateKey) return send(res, 400, { ok: false, error: 'missing privateKey' });
+      const current = getStoredConfig();
+      const result = writePrivateKey({ connectionId, privateKey });
+      const { config: next } = upsertConnection(current, {
+        id: connectionId,
+        privateKeyPath: result.path,
+        privateKeyFingerprint: result.fingerprint,
+        hasPrivateKey: true,
+      });
+      saveAppConfig(next, CONFIG_PATH);
+      return send(res, 200, {
+        ok: true,
+        connectionId,
+        fingerprint: result.fingerprint,
+        config: getPublicConfig(),
+      });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
   }
 
   if (req.method === 'GET' && u.pathname === '/api/slots') {

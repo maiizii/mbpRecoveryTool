@@ -8,7 +8,7 @@ const pageMeta = {
   machines: { title: '机位管理', desc: '查看机位、实例、运行状态并直接执行切换/启停。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
   recover: { title: '恢复任务', desc: '按顺序选择：用户 → 基座 → 机位 → 容器，并检查是否匹配。' },
-  settings: { title: '参数设置', desc: '配置盒子地址、基座列表等恢复前置参数。' },
+  settings: { title: '参数设置', desc: '配置盒子地址、SSH 连接、私钥、基座与运行参数。' },
 };
 
 function switchPage(page) {
@@ -82,11 +82,9 @@ async function pollRecoverJob(jobId) {
     if (logEl) logEl.scrollTop = logEl.scrollHeight;
     if (job && !['done', 'failed', 'finished', 'stopped'].includes(job.status)) {
       recoverPollTimer = setTimeout(() => pollRecoverJob(jobId), 1000);
-    } else {
-      if (recoverPollTimer) {
-        clearTimeout(recoverPollTimer);
-        recoverPollTimer = null;
-      }
+    } else if (recoverPollTimer) {
+      clearTimeout(recoverPollTimer);
+      recoverPollTimer = null;
     }
   } catch (err) {
     $('recoverJobLog').textContent = `日志轮询失败: ${err?.message || err}`;
@@ -219,45 +217,32 @@ function containerImageValue(item = {}) {
 
 function updateRecoverMatchHint() {
   const baseline = $('recoverBaseline')?.value || '';
-  const target = $('recoverTargetName')?.value || '';
+  const targetName = $('recoverTargetName')?.value || '';
   const slot = $('recoverSlot')?.value || '';
-  const row = slotRows.find(x => String(x.slot) === String(slot));
-  const item = (row?.all || []).find(x => String(x.name) === String(target));
-  const hintEl = $('recoverMatchHint');
-  if (!hintEl) return;
-  if (!baseline || !item) {
-    hintEl.textContent = '匹配提示：请先选择基座和容器';
+  const row = slotRows.find((x) => String(x.slot) === String(slot));
+  const all = [...(row?.running || []), ...(row?.exited || [])];
+  const hit = all.find((x) => String(x.name) === String(targetName));
+  if (!baseline || !targetName || !hit) {
+    $('recoverMatchHint').textContent = '匹配提示：请先选择基座和容器';
     return;
   }
-  const b = baselineImageHint(baseline);
-  const c = containerImageValue(item);
-  const matched = b && c && (baseline.includes(c) || c.includes(b) || b === c);
-  hintEl.textContent = matched
-    ? `匹配提示：✅ 当前容器镜像与基座看起来匹配（baseline=${b || '-'} / container=${c || '-'})`
-    : `匹配提示：⚠️ 当前容器镜像可能与基座不匹配（baseline=${b || '-'} / container=${c || '-'})`;
+  const baselineHint = baselineImageHint(baseline);
+  const image = containerImageValue(hit);
+  const ok = baselineHint && image && image.includes(baselineHint);
+  $('recoverMatchHint').textContent = [
+    `容器镜像: ${image || '-'}`,
+    `基座特征: ${baselineHint || '-'}`,
+    `匹配结论: ${ok ? '看起来匹配' : '未看出明确匹配，建议人工确认'}`,
+  ].join('\n');
 }
 
 function refreshTargetOptions(preferredTarget = '') {
-  const slot = $('recoverSlot')?.value;
-  const baseline = $('recoverBaseline')?.value || '';
-  const baselineHint = baselineImageHint(baseline);
-  const row = slotRows.find(x => String(x.slot) === String(slot));
-  const items = row ? row.all || [] : [];
-  const sorted = [...items].sort((a, b) => {
-    const ai = containerImageValue(a);
-    const bi = containerImageValue(b);
-    const am = baselineHint && ai && (baseline.includes(ai) || ai.includes(baselineHint));
-    const bm = baselineHint && bi && (baseline.includes(bi) || bi.includes(baselineHint));
-    if (am === bm) return String(a.name || '').localeCompare(String(b.name || ''));
-    return am ? -1 : 1;
-  });
+  const slot = $('recoverSlot')?.value || '';
+  const row = slotRows.find((x) => String(x.slot) === String(slot));
+  const items = [...(row?.running || []), ...(row?.exited || [])];
   setSelectOptions(
     $('recoverTargetName'),
-    sorted.map(x => {
-      const img = containerImageValue(x);
-      const matched = baselineHint && img && (baseline.includes(img) || img.includes(baselineHint));
-      return { value: x.name, label: `${matched ? '✅' : '⚠️'} ${x.name} [${x.status}] ${img || ''}`.trim() };
-    }),
+    items.map((x) => ({ value: x.name, label: `${x.name} | ${x.status || '-'} | ${containerImageValue(x) || '-'}` })),
     preferredTarget,
   );
   $('recoverTargetMirror').value = $('recoverTargetName').value || '';
@@ -273,38 +258,126 @@ function fillSlotSelectors(preferredSlot = '', preferredTarget = '') {
   refreshTargetOptions(preferredTarget);
 }
 
+function renderSshSection(cfg = {}) {
+  const active = cfg?.ssh?.activeConnection || null;
+  $('sshConnId').value = active?.id || cfg?.ssh?.activeConnectionId || '';
+  $('sshKeyConnectionId').value = active?.id || cfg?.ssh?.activeConnectionId || '';
+  $('sshConnName').value = active?.name || '';
+  $('sshHost').value = active?.sshHost || '';
+  $('sshPort').value = active?.sshPort || 22;
+  $('sshUser').value = active?.sshUser || 'root';
+  $('sshConnBoxBase').value = active?.boxBase || '';
+  $('sshConnBoxWorkRoot').value = active?.boxWorkRoot || '';
+
+  $('sshSummary').textContent = active ? [
+    `activeConnectionId: ${active.id || '-'}`,
+    `name: ${active.name || '-'}`,
+    `host: ${active.sshHost || '-'}`,
+    `port: ${active.sshPort || '-'}`,
+    `user: ${active.sshUser || '-'}`,
+    `boxBase: ${active.boxBase || '-'}`,
+    `boxWorkRoot: ${active.boxWorkRoot || '-'}`,
+    `私钥: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
+  ].join('\n') : '暂无 SSH 连接';
+
+  $('sshKeySummary').textContent = active ? [
+    `connectionId: ${active.id || '-'}`,
+    `私钥状态: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
+    `指纹: ${active.privateKeyFingerprint || '-'}`,
+    `更新时间: ${active.updatedAt || '-'}`,
+  ].join('\n') : '尚未配置私钥';
+}
+
 async function loadConfig() {
   const cfg = await j('/api/config');
   $('boxBase').value = cfg.boxBase || '';
+  $('sdkDir').value = cfg.sdkDir || '';
+  $('boxWorkRoot').value = cfg.recover?.boxWorkRoot || '';
+  $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
+  renderSshSection(cfg);
   updateRecoverMatchHint();
   $('configSummary').textContent = [
     `boxBase: ${cfg.boxBase || '-'}`,
+    `sdkDir: ${cfg.sdkDir || '-'}`,
+    `boxWorkRoot: ${cfg.recover?.boxWorkRoot || '-'}`,
+    `proxyMappingFile: ${cfg.recover?.proxyMappingFile || '-'}`,
     `默认目标容器: ${cfg.recover?.targetName || '-'}`,
     `默认机位: ${cfg.recover?.slot || '-'}`,
     `默认基座: ${cfg.recover?.baseline || '-'}`,
     `成功检索用户数: ${getDetectedUsers(cfg).length}`,
     `可用基座数: ${getBaselineOptions(cfg).length}`,
-    `SSH: ${cfg.ssh?.enabled ? '开启' : '关闭'}`,
+    `activeConnectionId: ${cfg.ssh?.activeConnectionId || '-'}`,
+    `运行配置: ${cfg.runtime?.configPath || '-'} | data=${cfg.runtime?.dataDir || '-'}`,
   ].join('\n');
   return cfg;
 }
 
 async function saveConfig() {
-  const cfg = await j('/api/config');
-  cfg.boxBase = $('boxBase').value.trim();
-  cfg.recover = cfg.recover || {};
-  cfg.recover.baselineOptions = $('baselineOptions').value
-    .split(/\r?\n/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-  const out = await j('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cfg) });
+  const payload = {
+    boxBase: $('boxBase').value.trim(),
+    sdkDir: $('sdkDir').value.trim(),
+    boxWorkRoot: $('boxWorkRoot').value.trim(),
+    proxyMappingFile: $('proxyMappingFile').value.trim(),
+    baselineOptions: $('baselineOptions').value
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean),
+  };
+  const out = await j('/api/settings/general', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
   await loadConfig();
-  showResult('配置已保存', out);
+  showResult('通用设置已保存', out);
+}
+
+async function saveSshConnection() {
+  const payload = {
+    id: $('sshConnId').value.trim(),
+    name: $('sshConnName').value.trim(),
+    sshHost: $('sshHost').value.trim(),
+    sshPort: Number($('sshPort').value.trim() || 22),
+    sshUser: $('sshUser').value.trim() || 'root',
+    boxBase: $('sshConnBoxBase').value.trim(),
+    boxWorkRoot: $('sshConnBoxWorkRoot').value.trim(),
+    setActive: true,
+  };
+  const out = await j('/api/settings/ssh-connection', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  await loadConfig();
+  showResult('SSH 连接已保存', out);
+}
+
+async function saveSshPrivateKey() {
+  const payload = {
+    connectionId: $('sshKeyConnectionId').value.trim() || $('sshConnId').value.trim(),
+    privateKey: $('sshPrivateKey').value,
+  };
+  if (!payload.connectionId) {
+    showResult('保存私钥失败', { error: '请先保存 SSH 连接，拿到 connectionId' });
+    return;
+  }
+  if (!payload.privateKey.trim()) {
+    showResult('保存私钥失败', { error: '请先粘贴私钥内容' });
+    return;
+  }
+  const out = await j('/api/settings/ssh-private-key', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  $('sshPrivateKey').value = '';
+  await loadConfig();
+  showResult('SSH 私钥已保存', out);
 }
 
 function getRecoverPayload() {
@@ -480,6 +553,8 @@ document.querySelectorAll('.menu-btn').forEach((btn) => {
 });
 
 $('saveConfig').onclick = saveConfig;
+$('saveSshConnection').onclick = saveSshConnection;
+$('saveSshPrivateKey').onclick = saveSshPrivateKey;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
 $('detectUser').onclick = detectUser;
@@ -487,6 +562,7 @@ $('recoverAttachLatest').onclick = attachLatestRecoverJob;
 $('recoverPrecheck').onclick = () => callRecoverApi('precheck');
 $('recoverPlan').onclick = () => callRecoverApi('plan');
 $('recoverDryRun').onclick = () => callRecoverApi('dryrun');
+
 async function copyTextCompat(text) {
   if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
     await navigator.clipboard.writeText(text);

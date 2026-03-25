@@ -11,7 +11,7 @@
     <aside class="sidebar">
       <div class="brand">
         <h1>MYT 恢复工具</h1>
-        <div class="muted">v1 开发版</div>
+        <div class="muted">v1 通用部署改造中</div>
       </div>
       <nav class="menu">
         <button class="menu-btn active" data-page="machines">机位管理</button>
@@ -20,7 +20,7 @@
         <button class="menu-btn" data-page="settings">参数设置</button>
       </nav>
       <div class="sidebar-foot muted">
-        当前先做纯 Web 版，服务端执行恢复。
+        Web 面板负责配置与编排，恢复动作仍由服务端执行。
       </div>
     </aside>
 
@@ -52,7 +52,7 @@
                 <input id="recoverUserId" placeholder="例如 7515749848698913838" />
                 <button id="detectUser" class="warn">检索用户</button>
               </div>
-              <div class="muted topgap">功能说明：输入 UID 后，系统自动定位 MBP、复制工作副本、拆包并提取基础资料；若失败则直接返回明确报错。</div>
+              <div class="muted topgap">输入 UID 后，服务端自动定位 MBP、复制工作副本、拆包并提取基础资料。</div>
             </div>
             <div class="full">
               <label>检索结果</label>
@@ -96,16 +96,15 @@
             <button id="recoverStop" class="warn">停止当前任务</button>
             <button id="recoverAttachLatest" class="secondary">查看最新任务</button>
           </div>
-          <div class="summary muted topgap">推荐用法：上面四项选好后，直接点【开始正式恢复（真执行）】。下方会实时滚动显示任务日志。</div>
+          <div class="summary muted topgap">四项选好后直接开跑；下方实时显示状态与日志。</div>
           <details class="topgap">
-            <summary>高级工具（平时不用）</summary>
+            <summary>高级工具</summary>
             <div class="actions topgap">
               <button id="saveRecoverConfig" class="secondary">保存当前选择</button>
               <button id="recoverPrecheck" class="secondary">仅做预检</button>
               <button id="recoverPlan" class="warn">仅生成计划</button>
               <button id="recoverDryRun" class="secondary">仅跑 Dry-Run</button>
             </div>
-            <div class="summary muted topgap">按钮说明：保存当前选择=只记住参数；仅做预检=检查必要条件；仅生成计划=看计划不执行；仅跑 Dry-Run=模拟流程不落地。正式恢复只用最上面的主按钮。</div>
           </details>
           <div class="panel topgap">
             <h3>恢复执行状态</h3>
@@ -124,28 +123,99 @@
 
       <section class="page" data-page="settings">
         <div class="panel">
-          <h2>参数设置</h2>
+          <h2>通用设置</h2>
           <div class="grid2">
-            <div class="full">
+            <div>
               <label>盒子地址 boxBase</label>
-              <div class="row">
-                <input id="boxBase" placeholder="http://192.168.2.54:30201" />
-                <button id="saveConfig">保存配置</button>
-              </div>
+              <input id="boxBase" placeholder="http://192.168.2.54:30201" />
             </div>
-            <div class="full">
-              <label>当前配置状态</label>
-              <div id="configSummary" class="summary muted">等待读取配置…</div>
+            <div>
+              <label>SDK 目录 sdkDir</label>
+              <input id="sdkDir" placeholder="例如 /app/sdk 或 /root/sdk" />
+            </div>
+            <div>
+              <label>盒子工作目录 boxWorkRoot</label>
+              <input id="boxWorkRoot" placeholder="/mmc/myt_recover_work" />
+            </div>
+            <div>
+              <label>代理映射文件 proxyMappingFile</label>
+              <input id="proxyMappingFile" placeholder="例如 /app/data/proxy-mappings/map.json" />
             </div>
             <div class="full">
               <label>可用基座列表（每行一个）</label>
               <textarea id="baselineOptions" rows="6" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
             </div>
-            <div class="full">
-              <label>说明</label>
-              <div class="summary muted">当前 v1 先保留最小配置入口；本轮新增“可用基座列表”，恢复页将从这里读取基座选项。</div>
+            <div class="full actions">
+              <button id="saveConfig">保存通用设置</button>
             </div>
           </div>
+        </div>
+
+        <div class="panel">
+          <h2>SSH 连接</h2>
+          <div class="grid2">
+            <div>
+              <label>连接名称</label>
+              <input id="sshConnName" placeholder="例如 默认盒子连接" />
+            </div>
+            <div>
+              <label>连接 ID（留空自动生成）</label>
+              <input id="sshConnId" placeholder="例如 a1b2c3d4e5f6" />
+            </div>
+            <div>
+              <label>SSH Host</label>
+              <input id="sshHost" placeholder="例如 1.2.3.4 或 my-box.example.com" />
+            </div>
+            <div>
+              <label>SSH Port</label>
+              <input id="sshPort" placeholder="22" />
+            </div>
+            <div>
+              <label>SSH User</label>
+              <input id="sshUser" placeholder="root" />
+            </div>
+            <div>
+              <label>该连接绑定的 boxBase（可选）</label>
+              <input id="sshConnBoxBase" placeholder="可留空；保存为连接级默认值" />
+            </div>
+            <div class="full">
+              <label>该连接绑定的 boxWorkRoot（可选）</label>
+              <input id="sshConnBoxWorkRoot" placeholder="例如 /mmc/myt_recover_work" />
+            </div>
+            <div class="full actions">
+              <button id="saveSshConnection" class="secondary">保存 SSH 连接</button>
+            </div>
+            <div class="full">
+              <label>连接状态</label>
+              <div id="sshSummary" class="summary muted">暂无 SSH 连接</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>SSH 私钥</h2>
+          <div class="grid2">
+            <div class="full">
+              <label>绑定 connectionId</label>
+              <input id="sshKeyConnectionId" placeholder="默认使用当前连接 ID" />
+            </div>
+            <div class="full">
+              <label>私钥内容（粘贴）</label>
+              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+            </div>
+            <div class="full actions">
+              <button id="saveSshPrivateKey" class="warn">保存私钥</button>
+            </div>
+            <div class="full">
+              <label>私钥状态</label>
+              <div id="sshKeySummary" class="summary muted">尚未配置私钥</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>当前配置状态</h2>
+          <div id="configSummary" class="summary muted">等待读取配置…</div>
         </div>
       </section>
 
