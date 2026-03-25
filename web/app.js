@@ -5,10 +5,11 @@ let slotRows = [];
 let currentRecoverJobId = '';
 let recoverPollTimer = null;
 const pageMeta = {
-  machines: { title: '机位管理', desc: '查看机位、实例、运行状态并直接执行切换/启停。' },
+  boxes: { title: '盒子管理', desc: '添加盒子、配置 SSH 私钥，并查看机位与容器运行状态。' },
+  baselines: { title: '基座管理', desc: '管理当前可用的基座列表；后续再演进成按盒子分别管理。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
   recover: { title: '恢复任务', desc: '按顺序选择：用户 → 基座 → 机位 → 容器，并检查是否匹配。' },
-  settings: { title: '参数设置', desc: '配置盒子地址、SSH 连接、私钥、基座与运行参数。' },
+  others: { title: '其他设置', desc: '暂存当前不属于前几个模块的设置项，后续继续收敛。' },
 };
 
 function switchPage(page) {
@@ -24,7 +25,7 @@ function summarizeMessage(data) {
 
 function showResult(title, data) {
   $('summary').textContent = title + '\n\n' + summarizeMessage(data);
-  $('raw').textContent = JSON.stringify(data, null, 2);
+  $('raw').textContent = data ? JSON.stringify(data, null, 2) : '暂无';
 }
 
 function formatReadableTime(input) {
@@ -195,6 +196,13 @@ function fillDetectedUserSelectors(cfg = {}) {
   );
 }
 
+function renderBaselineSummary(cfg = {}) {
+  const baselines = getBaselineOptions(cfg);
+  $('baselineSummary').textContent = baselines.length
+    ? baselines.map((x, i) => `${i + 1}. ${x}`).join('\n')
+    : '尚未配置基座';
+}
+
 function fillBaselineSelectors(cfg = {}) {
   const baselines = getBaselineOptions(cfg);
   setSelectOptions(
@@ -203,6 +211,7 @@ function fillBaselineSelectors(cfg = {}) {
     cfg?.recover?.baseline || '',
   );
   $('baselineOptions').value = baselines.join('\n');
+  renderBaselineSummary(cfg);
 }
 
 function baselineImageHint(baseline = '') {
@@ -266,22 +275,20 @@ function renderSshSection(cfg = {}) {
   $('sshHost').value = active?.sshHost || '';
   $('sshPort').value = active?.sshPort || 22;
   $('sshUser').value = active?.sshUser || 'root';
-  $('sshConnBoxBase').value = active?.boxBase || '';
-  $('sshConnBoxWorkRoot').value = active?.boxWorkRoot || '';
 
   $('sshSummary').textContent = active ? [
-    `activeConnectionId: ${active.id || '-'}`,
-    `name: ${active.name || '-'}`,
-    `host: ${active.sshHost || '-'}`,
-    `port: ${active.sshPort || '-'}`,
-    `user: ${active.sshUser || '-'}`,
-    `boxBase: ${active.boxBase || '-'}`,
-    `boxWorkRoot: ${active.boxWorkRoot || '-'}`,
+    `当前盒子ID: ${active.id || '-'}`,
+    `盒子名称: ${active.name || '-'}`,
+    `SSH地址: ${active.sshHost || '-'}`,
+    `SSH端口: ${active.sshPort || '-'}`,
+    `SSH用户: ${active.sshUser || '-'}`,
+    `程序推导 boxBase: ${active.boxBase || '(保存后自动生成)'}`,
+    `工作目录: ${active.boxWorkRoot || '/mmc/myt_recover_work'}`,
     `私钥: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
-  ].join('\n') : '暂无 SSH 连接';
+  ].join('\n') : '暂无盒子';
 
   $('sshKeySummary').textContent = active ? [
-    `connectionId: ${active.id || '-'}`,
+    `当前盒子ID: ${active.id || '-'}`,
     `私钥状态: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
     `指纹: ${active.privateKeyFingerprint || '-'}`,
     `更新时间: ${active.updatedAt || '-'}`,
@@ -290,9 +297,7 @@ function renderSshSection(cfg = {}) {
 
 async function loadConfig() {
   const cfg = await j('/api/config');
-  $('boxBase').value = cfg.boxBase || '';
   $('sdkDir').value = cfg.sdkDir || '';
-  $('boxWorkRoot').value = cfg.recover?.boxWorkRoot || '';
   $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
@@ -302,10 +307,10 @@ async function loadConfig() {
   renderSshSection(cfg);
   updateRecoverMatchHint();
   $('configSummary').textContent = [
-    `boxBase: ${cfg.boxBase || '-'}`,
-    `sdkDir: ${cfg.sdkDir || '-'}`,
-    `boxWorkRoot: ${cfg.recover?.boxWorkRoot || '-'}`,
-    `proxyMappingFile: ${cfg.recover?.proxyMappingFile || '-'}`,
+    `当前 boxBase: ${cfg.boxBase || '-'}`,
+    `SDK目录: ${cfg.sdkDir || '-'}`,
+    `工作目录: ${cfg.recover?.boxWorkRoot || '-'}`,
+    `代理映射文件: ${cfg.recover?.proxyMappingFile || '-'}`,
     `默认目标容器: ${cfg.recover?.targetName || '-'}`,
     `默认机位: ${cfg.recover?.slot || '-'}`,
     `默认基座: ${cfg.recover?.baseline || '-'}`,
@@ -317,11 +322,11 @@ async function loadConfig() {
   return cfg;
 }
 
-async function saveConfig() {
+async function saveOtherSettings() {
   const payload = {
-    boxBase: $('boxBase').value.trim(),
+    boxBase: '',
     sdkDir: $('sdkDir').value.trim(),
-    boxWorkRoot: $('boxWorkRoot').value.trim(),
+    boxWorkRoot: '',
     proxyMappingFile: $('proxyMappingFile').value.trim(),
     baselineOptions: $('baselineOptions').value
       .split(/\r?\n/)
@@ -334,18 +339,40 @@ async function saveConfig() {
     body: JSON.stringify(payload),
   });
   await loadConfig();
-  showResult('通用设置已保存', out);
+  showResult('其他设置已保存', out);
+}
+
+async function saveBaselines() {
+  const payload = {
+    boxBase: '',
+    sdkDir: $('sdkDir').value.trim(),
+    boxWorkRoot: '',
+    proxyMappingFile: $('proxyMappingFile').value.trim(),
+    baselineOptions: $('baselineOptions').value
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean),
+  };
+  const out = await j('/api/settings/general', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  await loadConfig();
+  showResult('基座列表已保存', out);
 }
 
 async function saveSshConnection() {
+  const host = $('sshHost').value.trim();
+  const port = Number($('sshPort').value.trim() || 22);
   const payload = {
     id: $('sshConnId').value.trim(),
     name: $('sshConnName').value.trim(),
-    sshHost: $('sshHost').value.trim(),
-    sshPort: Number($('sshPort').value.trim() || 22),
+    sshHost: host,
+    sshPort: port,
     sshUser: $('sshUser').value.trim() || 'root',
-    boxBase: $('sshConnBoxBase').value.trim(),
-    boxWorkRoot: $('sshConnBoxWorkRoot').value.trim(),
+    boxBase: host ? `http://${host}:30201` : '',
+    boxWorkRoot: '/mmc/myt_recover_work',
     setActive: true,
   };
   const out = await j('/api/settings/ssh-connection', {
@@ -354,7 +381,7 @@ async function saveSshConnection() {
     body: JSON.stringify(payload),
   });
   await loadConfig();
-  showResult('SSH 连接已保存', out);
+  showResult('盒子已保存', out);
 }
 
 async function saveSshPrivateKey() {
@@ -363,11 +390,11 @@ async function saveSshPrivateKey() {
     privateKey: $('sshPrivateKey').value,
   };
   if (!payload.connectionId) {
-    showResult('保存私钥失败', { error: '请先保存 SSH 连接，拿到 connectionId' });
+    showResult('保存盒子私钥失败', { error: '请先保存盒子，拿到内部盒子ID' });
     return;
   }
   if (!payload.privateKey.trim()) {
-    showResult('保存私钥失败', { error: '请先粘贴私钥内容' });
+    showResult('保存盒子私钥失败', { error: '请先粘贴私钥内容' });
     return;
   }
   const out = await j('/api/settings/ssh-private-key', {
@@ -377,7 +404,7 @@ async function saveSshPrivateKey() {
   });
   $('sshPrivateKey').value = '';
   await loadConfig();
-  showResult('SSH 私钥已保存', out);
+  showResult('盒子私钥已保存', out);
 }
 
 function getRecoverPayload() {
@@ -410,7 +437,7 @@ async function saveRecoverConfig(extra = {}, opts = {}) {
 async function refreshSlots() {
   const out = await j('/api/slots');
   slotRows = normalizeSlots(out);
-  $('slots').innerHTML = slotRows.map(slotCard).join('') || '<div class="muted">暂无机位数据。请先到“参数设置”确认 boxBase 是否指向盒子总控接口，而不是单实例接口。</div>';
+  $('slots').innerHTML = slotRows.map(slotCard).join('') || '<div class="muted">暂无机位数据。请先在“盒子管理”里保存 SSH 信息，并确认程序自动推导出的 boxBase 可访问盒子总控接口。</div>';
   const cfg = await j('/api/config');
   fillSlotSelectors(cfg.recover?.slot || '', cfg.recover?.targetName || '');
   bindActions();
@@ -552,9 +579,10 @@ document.querySelectorAll('.menu-btn').forEach((btn) => {
   btn.onclick = () => switchPage(btn.dataset.page);
 });
 
-$('saveConfig').onclick = saveConfig;
 $('saveSshConnection').onclick = saveSshConnection;
 $('saveSshPrivateKey').onclick = saveSshPrivateKey;
+$('saveBaselines').onclick = saveBaselines;
+$('saveOtherSettings').onclick = saveOtherSettings;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
 $('detectUser').onclick = detectUser;

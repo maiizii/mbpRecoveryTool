@@ -14,31 +14,100 @@
         <div class="muted">v1 通用部署改造中</div>
       </div>
       <nav class="menu">
-        <button class="menu-btn active" data-page="machines">机位管理</button>
+        <button class="menu-btn active" data-page="boxes">盒子管理</button>
+        <button class="menu-btn" data-page="baselines">基座管理</button>
         <button class="menu-btn" data-page="users">用户检索</button>
         <button class="menu-btn" data-page="recover">恢复任务</button>
-        <button class="menu-btn" data-page="settings">参数设置</button>
+        <button class="menu-btn" data-page="others">其他设置</button>
       </nav>
       <div class="sidebar-foot muted">
-        Web 面板负责配置与编排，恢复动作仍由服务端执行。
+        先把业务对象收敛成：盒子、基座、用户、恢复任务；其他零散项统一收进“其他设置”。
       </div>
     </aside>
 
     <main class="main">
       <header class="topbar">
         <div>
-          <div id="pageTitle" class="page-title">机位管理</div>
-          <div id="pageDesc" class="muted">查看机位、实例、运行状态并直接执行切换/启停。</div>
+          <div id="pageTitle" class="page-title">盒子管理</div>
+          <div id="pageDesc" class="muted">添加盒子、配置 SSH 私钥，并查看机位与容器运行状态。</div>
         </div>
         <div class="top-actions">
           <button id="refreshSlots" class="secondary">刷新机位</button>
         </div>
       </header>
 
-      <section class="page active" data-page="machines">
+      <section class="page active" data-page="boxes">
+        <div class="panel">
+          <h2>盒子管理</h2>
+          <div class="grid2">
+            <input id="sshConnId" type="hidden" />
+            <input id="sshKeyConnectionId" type="hidden" />
+            <div>
+              <label>盒子名称</label>
+              <input id="sshConnName" placeholder="例如 北京盒子1 / 默认盒子" />
+            </div>
+            <div>
+              <label>盒子 IP</label>
+              <input id="sshHost" placeholder="例如 192.168.2.54" />
+            </div>
+            <div>
+              <label>SSH 端口</label>
+              <input id="sshPort" placeholder="22" />
+            </div>
+            <div>
+              <label>SSH 用户</label>
+              <input id="sshUser" placeholder="root" value="root" />
+            </div>
+            <div class="full actions">
+              <button id="saveSshConnection" class="secondary">保存盒子</button>
+            </div>
+            <div class="full">
+              <label>盒子状态</label>
+              <div id="sshSummary" class="summary muted">暂无盒子</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>盒子私钥</h2>
+          <div class="grid2">
+            <div class="full">
+              <label>私钥内容（粘贴）</label>
+              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+            </div>
+            <div class="full actions">
+              <button id="saveSshPrivateKey" class="warn">保存盒子私钥</button>
+            </div>
+            <div class="full">
+              <label>私钥状态</label>
+              <div id="sshKeySummary" class="summary muted">尚未配置私钥</div>
+            </div>
+          </div>
+        </div>
+
         <div class="panel">
           <h2>机位总览</h2>
-          <div id="slots" class="slots"></div>
+          <div class="muted">当前先保留原有机位/容器操作能力，方便现阶段继续使用。</div>
+          <div id="slots" class="slots topgap"></div>
+        </div>
+      </section>
+
+      <section class="page" data-page="baselines">
+        <div class="panel">
+          <h2>基座管理</h2>
+          <div class="grid2">
+            <div class="full">
+              <label>可用基座列表（每行一个）</label>
+              <textarea id="baselineOptions" rows="10" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
+            </div>
+            <div class="full actions">
+              <button id="saveBaselines">保存基座列表</button>
+            </div>
+            <div class="full">
+              <label>基座摘要</label>
+              <div id="baselineSummary" class="summary muted">尚未配置基座</div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -121,101 +190,26 @@
         </div>
       </section>
 
-      <section class="page" data-page="settings">
+      <section class="page" data-page="others">
         <div class="panel">
-          <h2>通用设置</h2>
+          <h2>其他设置</h2>
           <div class="grid2">
             <div>
-              <label>盒子地址 boxBase</label>
-              <input id="boxBase" placeholder="http://192.168.2.54:30201" />
-            </div>
-            <div>
-              <label>SDK 目录 sdkDir</label>
+              <label>SDK 目录</label>
               <input id="sdkDir" placeholder="例如 /app/sdk 或 /root/sdk" />
             </div>
             <div>
-              <label>盒子工作目录 boxWorkRoot</label>
-              <input id="boxWorkRoot" placeholder="/mmc/myt_recover_work" />
-            </div>
-            <div>
-              <label>代理映射文件 proxyMappingFile</label>
+              <label>代理映射文件</label>
               <input id="proxyMappingFile" placeholder="例如 /app/data/proxy-mappings/map.json" />
             </div>
-            <div class="full">
-              <label>可用基座列表（每行一个）</label>
-              <textarea id="baselineOptions" rows="6" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
-            </div>
             <div class="full actions">
-              <button id="saveConfig">保存通用设置</button>
+              <button id="saveOtherSettings">保存其他设置</button>
             </div>
           </div>
-        </div>
-
-        <div class="panel">
-          <h2>SSH 连接</h2>
-          <div class="grid2">
-            <div>
-              <label>连接名称</label>
-              <input id="sshConnName" placeholder="例如 默认盒子连接" />
-            </div>
-            <div>
-              <label>连接 ID（留空自动生成）</label>
-              <input id="sshConnId" placeholder="例如 a1b2c3d4e5f6" />
-            </div>
-            <div>
-              <label>SSH Host</label>
-              <input id="sshHost" placeholder="例如 1.2.3.4 或 my-box.example.com" />
-            </div>
-            <div>
-              <label>SSH Port</label>
-              <input id="sshPort" placeholder="22" />
-            </div>
-            <div>
-              <label>SSH User</label>
-              <input id="sshUser" placeholder="root" />
-            </div>
-            <div>
-              <label>该连接绑定的 boxBase（可选）</label>
-              <input id="sshConnBoxBase" placeholder="可留空；保存为连接级默认值" />
-            </div>
-            <div class="full">
-              <label>该连接绑定的 boxWorkRoot（可选）</label>
-              <input id="sshConnBoxWorkRoot" placeholder="例如 /mmc/myt_recover_work" />
-            </div>
-            <div class="full actions">
-              <button id="saveSshConnection" class="secondary">保存 SSH 连接</button>
-            </div>
-            <div class="full">
-              <label>连接状态</label>
-              <div id="sshSummary" class="summary muted">暂无 SSH 连接</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>SSH 私钥</h2>
-          <div class="grid2">
-            <div class="full">
-              <label>绑定 connectionId</label>
-              <input id="sshKeyConnectionId" placeholder="默认使用当前连接 ID" />
-            </div>
-            <div class="full">
-              <label>私钥内容（粘贴）</label>
-              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-            </div>
-            <div class="full actions">
-              <button id="saveSshPrivateKey" class="warn">保存私钥</button>
-            </div>
-            <div class="full">
-              <label>私钥状态</label>
-              <div id="sshKeySummary" class="summary muted">尚未配置私钥</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>当前配置状态</h2>
-          <div id="configSummary" class="summary muted">等待读取配置…</div>
+          <details class="topgap">
+            <summary>高级兼容信息（当前只读）</summary>
+            <div id="configSummary" class="summary muted topgap">等待读取配置…</div>
+          </details>
         </div>
       </section>
 
