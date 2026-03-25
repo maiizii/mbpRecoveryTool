@@ -328,6 +328,8 @@ function fillSshForm(connection = null) {
   $('sshUser').value = connection?.sshUser || 'root';
   $('managementPort').value = connection?.managementPort || '';
   $('sshPrivateKey').value = '';
+  const btn = $('saveSshConnection');
+  if (btn) btn.textContent = connection?.id ? '保存修改（含私钥）' : '新增盒子（含私钥）';
 }
 
 async function activateConnectionById(connectionId, opts = {}) {
@@ -401,18 +403,11 @@ function bindConnectionListActions() {
 
 function clearSshForm() {
   fillSshForm(null);
-  showResult('盒子表单已清空', { ok: true });
+  showResult('盒子表单已清空，当前为新增模式', { ok: true });
 }
 
 function renderSshSection(cfg = {}) {
   const active = cfg?.ssh?.activeConnection || null;
-  $('sshConnId').value = active?.id || cfg?.ssh?.activeConnectionId || '';
-  $('sshKeyConnectionId').value = active?.id || cfg?.ssh?.activeConnectionId || '';
-  $('sshConnName').value = active?.name || '';
-  $('sshHost').value = active?.sshHost || '';
-  $('sshPort').value = active?.sshPort || 22;
-  $('sshUser').value = active?.sshUser || 'root';
-  $('managementPort').value = active?.managementPort || '';
 
   $('sshSummary').textContent = active ? [
     `当前盒子ID: ${active.id || '-'}`,
@@ -729,7 +724,7 @@ $('saveBaselines').onclick = saveBaselines;
 $('saveOtherSettings').onclick = saveOtherSettings;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
-$('applyMachineConnection').onclick = () => activateConnectionById($('machineConnectionSelect')?.value || '');
+$('refreshSlotsMachine').onclick = refreshSlots;
 $('detectUser').onclick = detectUser;
 $('recoverAttachLatest').onclick = attachLatestRecoverJob;
 $('recoverPrecheck').onclick = () => callRecoverApi('precheck');
@@ -790,9 +785,15 @@ $('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHi
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
-$('machineConnectionSelect').onchange = () => {
+$('machineConnectionSelect').onchange = async () => {
+  const connectionId = $('machineConnectionSelect')?.value || '';
+  if (!connectionId) return;
+  await activateConnectionById(connectionId, { silent: true });
   const selectedText = $('machineConnectionSelect')?.selectedOptions?.[0]?.textContent || '';
-  if ($('machineConnectionSummary')) $('machineConnectionSummary').textContent = `待切换盒子: ${selectedText || '-'}\n点击“切换到这个盒子”后生效。`;
+  if ($('machineConnectionSummary')) {
+    $('machineConnectionSummary').textContent = `当前盒子已切换: ${selectedText || '-'}\n机位已自动刷新。`;
+  }
 };
 
+fillSshForm(null);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
