@@ -296,7 +296,7 @@ function renderConnectionList(cfg = {}) {
           <span>${x.name || x.sshHost || x.id}</span>
           <span class="tag">${String(x.id) === String(activeId) ? '当前盒子' : '已保存'}</span>
         </div>
-        <div class="summary muted topgap">SSH: ${x.sshUser || '-'}@${x.sshHost || '-'}:${x.sshPort || '-'}\n私钥: ${x.hasPrivateKey ? '已配置' : '未配置'}\n更新时间: ${x.updatedAt || '-'}</div>
+        <div class="summary muted topgap">SSH: ${x.sshUser || '-'}@${x.sshHost || '-'}:${x.sshPort || '-'}\n管理端口: ${x.managementPort || '-'}\nboxBase: ${x.boxBase || '-'}\n私钥: ${x.hasPrivateKey ? '已配置' : '未配置'}\n更新时间: ${x.updatedAt || '-'}</div>
         <div class="actions">
           <button class="secondary" data-conn-action="edit" data-conn-id="${x.id}">编辑回填</button>
           <button class="secondary" data-conn-action="activate" data-conn-id="${x.id}">设为当前</button>
@@ -311,8 +311,9 @@ function renderConnectionList(cfg = {}) {
     machineSummary.textContent = [
       `当前盒子: ${active?.name || '-'}`,
       `SSH: ${active?.sshUser || '-'}@${active?.sshHost || '-'}:${active?.sshPort || '-'}`,
+      `管理端口: ${active?.managementPort || '-'}`,
       `私钥: ${active?.hasPrivateKey ? '已配置' : '未配置'}`,
-      `boxBase: ${active?.boxBase || '(保存后自动推导)'}`,
+      `boxBase: ${active?.boxBase || '(未设置)'}`,
       `工作目录: ${active?.boxWorkRoot || '/mmc/myt_recover_work'}`,
     ].join('\n');
   }
@@ -325,6 +326,7 @@ function fillSshForm(connection = null) {
   $('sshHost').value = connection?.sshHost || '';
   $('sshPort').value = connection?.sshPort || 22;
   $('sshUser').value = connection?.sshUser || 'root';
+  $('managementPort').value = connection?.managementPort || '';
   $('sshPrivateKey').value = '';
 }
 
@@ -345,6 +347,7 @@ async function activateConnectionById(connectionId, opts = {}) {
       sshHost: hit.sshHost,
       sshPort: hit.sshPort,
       sshUser: hit.sshUser,
+      managementPort: hit.managementPort,
       boxBase: hit.boxBase,
       boxWorkRoot: hit.boxWorkRoot,
       setActive: true,
@@ -401,6 +404,7 @@ function renderSshSection(cfg = {}) {
   $('sshHost').value = active?.sshHost || '';
   $('sshPort').value = active?.sshPort || 22;
   $('sshUser').value = active?.sshUser || 'root';
+  $('managementPort').value = active?.managementPort || '';
 
   $('sshSummary').textContent = active ? [
     `当前盒子ID: ${active.id || '-'}`,
@@ -408,7 +412,8 @@ function renderSshSection(cfg = {}) {
     `SSH地址: ${active.sshHost || '-'}`,
     `SSH端口: ${active.sshPort || '-'}`,
     `SSH用户: ${active.sshUser || '-'}`,
-    `程序推导 boxBase: ${active.boxBase || '(保存后自动生成)'}`,
+    `管理端口: ${active.managementPort || '-'}`,
+    `boxBase: ${active.boxBase || '(未设置)'}`,
     `工作目录: ${active.boxWorkRoot || '/mmc/myt_recover_work'}`,
     `私钥: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
   ].join('\n') : '暂无盒子';
@@ -497,9 +502,10 @@ async function saveSshConnection() {
   const privateKey = $('sshPrivateKey').value.trim();
   const name = $('sshConnName').value.trim();
   const user = $('sshUser').value.trim() || 'root';
+  const managementPort = Number($('managementPort').value.trim() || 0) || 0;
 
-  if (!name || !host || !port || !user || !privateKey) {
-    showResult('保存盒子失败', { error: '盒子名称、IP、端口、用户、私钥都是必填项' });
+  if (!name || !host || !port || !user || !privateKey || !managementPort) {
+    showResult('保存盒子失败', { error: '盒子名称、IP、SSH端口、SSH用户、管理端口、私钥都是必填项' });
     return;
   }
 
@@ -509,7 +515,8 @@ async function saveSshConnection() {
     sshHost: host,
     sshPort: port,
     sshUser: user,
-    boxBase: host ? `http://${host}:30201` : '',
+    managementPort,
+    boxBase: `http://${host}:${managementPort}`,
     boxWorkRoot: '/mmc/myt_recover_work',
     setActive: true,
   };

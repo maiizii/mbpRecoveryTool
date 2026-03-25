@@ -110,6 +110,7 @@ export function normalizeConnection(input = {}) {
     sshHost: String(input.sshHost || input.host || '').trim(),
     sshPort: Number(input.sshPort || input.port || 22) || 22,
     sshUser: String(input.sshUser || input.user || 'root').trim() || 'root',
+    managementPort: Number(input.managementPort || 0) || 0,
     boxBase: String(input.boxBase || '').trim(),
     boxWorkRoot: String(input.boxWorkRoot || '').trim(),
     privateKeyPath: String(input.privateKeyPath || '').trim(),

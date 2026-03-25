@@ -261,6 +261,7 @@ function getPublicConfig() {
         sshHost: active.sshHost,
         sshPort: active.sshPort,
         sshUser: active.sshUser,
+        managementPort: active.managementPort,
         boxBase: active.boxBase,
         boxWorkRoot: active.boxWorkRoot,
         privateKeyPath: active.privateKeyPath ? 'configured' : '',
@@ -1526,6 +1527,7 @@ const server = http.createServer(async (req, res) => {
         sshHost: String(body.sshHost || '').trim(),
         sshPort: Number(body.sshPort || 22) || 22,
         sshUser: String(body.sshUser || 'root').trim() || 'root',
+        managementPort: Number(body.managementPort || 0) || 0,
         boxBase: String(body.boxBase || '').trim(),
         boxWorkRoot: String(body.boxWorkRoot || '').trim(),
       });
