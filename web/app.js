@@ -365,12 +365,21 @@ async function saveBaselines() {
 async function saveSshConnection() {
   const host = $('sshHost').value.trim();
   const port = Number($('sshPort').value.trim() || 22);
+  const privateKey = $('sshPrivateKey').value.trim();
+  const name = $('sshConnName').value.trim();
+  const user = $('sshUser').value.trim() || 'root';
+
+  if (!name || !host || !port || !user || !privateKey) {
+    showResult('保存盒子失败', { error: '盒子名称、IP、端口、用户、私钥都是必填项' });
+    return;
+  }
+
   const payload = {
     id: $('sshConnId').value.trim(),
-    name: $('sshConnName').value.trim(),
+    name,
     sshHost: host,
     sshPort: port,
-    sshUser: $('sshUser').value.trim() || 'root',
+    sshUser: user,
     boxBase: host ? `http://${host}:30201` : '',
     boxWorkRoot: '/mmc/myt_recover_work',
     setActive: true,
@@ -380,31 +389,22 @@ async function saveSshConnection() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  await loadConfig();
-  showResult('盒子已保存', out);
-}
 
-async function saveSshPrivateKey() {
-  const payload = {
-    connectionId: $('sshKeyConnectionId').value.trim() || $('sshConnId').value.trim(),
-    privateKey: $('sshPrivateKey').value,
-  };
-  if (!payload.connectionId) {
-    showResult('保存盒子私钥失败', { error: '请先保存盒子，拿到内部盒子ID' });
+  const connectionId = out?.connectionId || payload.id;
+  if (!connectionId) {
+    showResult('保存盒子失败', { error: '盒子已保存，但未拿到 connectionId，无法继续保存私钥' });
     return;
   }
-  if (!payload.privateKey.trim()) {
-    showResult('保存盒子私钥失败', { error: '请先粘贴私钥内容' });
-    return;
-  }
-  const out = await j('/api/settings/ssh-private-key', {
+
+  const keyOut = await j('/api/settings/ssh-private-key', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ connectionId, privateKey }),
   });
+
   $('sshPrivateKey').value = '';
   await loadConfig();
-  showResult('盒子私钥已保存', out);
+  showResult('盒子与私钥已保存', { ok: true, connectionId, box: out, privateKey: keyOut });
 }
 
 function getRecoverPayload() {
@@ -580,7 +580,6 @@ document.querySelectorAll('.menu-btn').forEach((btn) => {
 });
 
 $('saveSshConnection').onclick = saveSshConnection;
-$('saveSshPrivateKey').onclick = saveSshPrivateKey;
 $('saveBaselines').onclick = saveBaselines;
 $('saveOtherSettings').onclick = saveOtherSettings;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();

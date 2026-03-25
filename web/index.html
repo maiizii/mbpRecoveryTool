@@ -52,31 +52,23 @@
             </div>
             <div>
               <label>SSH 端口</label>
-              <input id="sshPort" placeholder="22" />
+              <input id="sshPort" placeholder="22" value="22" />
             </div>
             <div>
               <label>SSH 用户</label>
               <input id="sshUser" placeholder="root" value="root" />
             </div>
+            <div class="full">
+              <label>私钥内容（必填）</label>
+              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+              <div class="muted topgap">盒子 IP / 端口 / 用户 / 私钥建议一次录入，一次保存。</div>
+            </div>
             <div class="full actions">
-              <button id="saveSshConnection" class="secondary">保存盒子</button>
+              <button id="saveSshConnection" class="secondary">保存盒子（含私钥）</button>
             </div>
             <div class="full">
               <label>盒子状态</label>
               <div id="sshSummary" class="summary muted">暂无盒子</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>盒子私钥</h2>
-          <div class="grid2">
-            <div class="full">
-              <label>私钥内容（粘贴）</label>
-              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-            </div>
-            <div class="full actions">
-              <button id="saveSshPrivateKey" class="warn">保存盒子私钥</button>
             </div>
             <div class="full">
               <label>私钥状态</label>
