@@ -61,11 +61,16 @@
             </div>
             <div class="full">
               <label>私钥内容（必填）</label>
-              <textarea id="sshPrivateKey" class="editor secret-editor" rows="14" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+              <textarea id="sshPrivateKey" class="editor secret-editor" rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
               <div class="muted topgap">盒子 IP / 端口 / 用户 / 私钥建议一次录入，一次保存。</div>
             </div>
             <div class="full actions">
               <button id="saveSshConnection" class="secondary">保存盒子（含私钥）</button>
+              <button id="clearSshForm" class="secondary">清空表单</button>
+            </div>
+            <div class="full">
+              <label>已保存盒子</label>
+              <div id="sshConnectionList" class="stack-list muted">暂无盒子</div>
             </div>
             <div class="full">
               <label>盒子状态</label>
@@ -82,7 +87,19 @@
       <section class="page" data-page="machines">
         <div class="panel">
           <h2>机位管理</h2>
-          <div class="muted">集中查看机位、容器运行状态，并直接执行启停/切换操作。</div>
+          <div class="grid2">
+            <div>
+              <label>当前盒子</label>
+              <select id="machineConnectionSelect"></select>
+            </div>
+            <div class="actions align-end">
+              <button id="applyMachineConnection" class="secondary">切换到这个盒子</button>
+              <button id="refreshSlots" class="secondary">刷新机位</button>
+            </div>
+            <div class="full">
+              <div id="machineConnectionSummary" class="summary muted">请先选择盒子</div>
+            </div>
+          </div>
           <div id="slots" class="slots topgap"></div>
         </div>
       </section>
@@ -93,7 +110,7 @@
           <div class="grid2">
             <div class="full">
               <label>可用基座列表（每行一个）</label>
-              <textarea id="baselineOptions" class="editor baseline-editor" rows="14" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
+              <textarea id="baselineOptions" class="editor baseline-editor" rows="8" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
             </div>
             <div class="full actions">
               <button id="saveBaselines">保存基座列表</button>

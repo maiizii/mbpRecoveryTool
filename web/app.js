@@ -268,6 +268,113 @@ function fillSlotSelectors(preferredSlot = '', preferredTarget = '') {
   refreshTargetOptions(preferredTarget);
 }
 
+function renderConnectionList(cfg = {}) {
+  const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+  const activeId = cfg?.ssh?.activeConnectionId || '';
+  const boxWrap = $('sshConnectionList');
+  const machineSelect = $('machineConnectionSelect');
+  const machineSummary = $('machineConnectionSummary');
+
+  if (machineSelect) {
+    setSelectOptions(
+      machineSelect,
+      list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
+      activeId,
+    );
+  }
+
+  if (!list.length) {
+    if (boxWrap) boxWrap.textContent = '暂无盒子';
+    if (machineSummary) machineSummary.textContent = '暂无盒子，请先去“盒子管理”录入盒子信息。';
+    return;
+  }
+
+  if (boxWrap) {
+    boxWrap.innerHTML = list.map((x) => `
+      <div class="list-card ${String(x.id) === String(activeId) ? 'active' : ''}">
+        <div class="list-card-title">
+          <span>${x.name || x.sshHost || x.id}</span>
+          <span class="tag">${String(x.id) === String(activeId) ? '当前盒子' : '已保存'}</span>
+        </div>
+        <div class="summary muted topgap">SSH: ${x.sshUser || '-'}@${x.sshHost || '-'}:${x.sshPort || '-'}\n私钥: ${x.hasPrivateKey ? '已配置' : '未配置'}\n更新时间: ${x.updatedAt || '-'}</div>
+        <div class="actions">
+          <button class="secondary" data-conn-action="edit" data-conn-id="${x.id}">编辑回填</button>
+          <button class="secondary" data-conn-action="activate" data-conn-id="${x.id}">设为当前</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  const active = list.find((x) => String(x.id) === String(activeId)) || list[0];
+  if (machineSummary) {
+    machineSummary.textContent = [
+      `当前盒子: ${active?.name || '-'}`,
+      `SSH: ${active?.sshUser || '-'}@${active?.sshHost || '-'}:${active?.sshPort || '-'}`,
+      `私钥: ${active?.hasPrivateKey ? '已配置' : '未配置'}`,
+      `boxBase: ${active?.boxBase || '(保存后自动推导)'}`,
+      `工作目录: ${active?.boxWorkRoot || '/mmc/myt_recover_work'}`,
+    ].join('\n');
+  }
+}
+
+function fillSshForm(connection = null) {
+  $('sshConnId').value = connection?.id || '';
+  $('sshKeyConnectionId').value = connection?.id || '';
+  $('sshConnName').value = connection?.name || '';
+  $('sshHost').value = connection?.sshHost || '';
+  $('sshPort').value = connection?.sshPort || 22;
+  $('sshUser').value = connection?.sshUser || 'root';
+  $('sshPrivateKey').value = '';
+}
+
+async function activateConnectionById(connectionId, opts = {}) {
+  const cfg = await j('/api/config');
+  const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+  const hit = list.find((x) => String(x.id) === String(connectionId));
+  if (!hit) {
+    showResult('切换盒子失败', { error: '未找到目标盒子' });
+    return;
+  }
+  const out = await j('/api/settings/ssh-connection', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: hit.id,
+      name: hit.name,
+      sshHost: hit.sshHost,
+      sshPort: hit.sshPort,
+      sshUser: hit.sshUser,
+      boxBase: hit.boxBase,
+      boxWorkRoot: hit.boxWorkRoot,
+      setActive: true,
+    }),
+  });
+  await loadConfig();
+  if (!opts.silent) showResult('当前盒子已切换', out);
+  await refreshSlots();
+}
+
+function bindConnectionListActions() {
+  document.querySelectorAll('button[data-conn-action="edit"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const cfg = await j('/api/config');
+      const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+      const hit = list.find((x) => String(x.id) === String(btn.dataset.connId));
+      fillSshForm(hit || null);
+      switchPage('boxes');
+      showResult('盒子信息已回填表单', { ok: true, connectionId: btn.dataset.connId });
+    };
+  });
+  document.querySelectorAll('button[data-conn-action="activate"]').forEach((btn) => {
+    btn.onclick = () => activateConnectionById(btn.dataset.connId);
+  });
+}
+
+function clearSshForm() {
+  fillSshForm(null);
+  showResult('盒子表单已清空', { ok: true });
+}
+
 function renderSshSection(cfg = {}) {
   const active = cfg?.ssh?.activeConnection || null;
   $('sshConnId').value = active?.id || cfg?.ssh?.activeConnectionId || '';
@@ -294,6 +401,9 @@ function renderSshSection(cfg = {}) {
     `指纹: ${active.privateKeyFingerprint || '-'}`,
     `更新时间: ${active.updatedAt || '-'}`,
   ].join('\n') : '尚未配置私钥';
+
+  renderConnectionList(cfg);
+  bindConnectionListActions();
 }
 
 async function loadConfig() {
@@ -581,10 +691,12 @@ document.querySelectorAll('.menu-btn').forEach((btn) => {
 });
 
 $('saveSshConnection').onclick = saveSshConnection;
+$('clearSshForm').onclick = clearSshForm;
 $('saveBaselines').onclick = saveBaselines;
 $('saveOtherSettings').onclick = saveOtherSettings;
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
+$('applyMachineConnection').onclick = () => activateConnectionById($('machineConnectionSelect')?.value || '');
 $('detectUser').onclick = detectUser;
 $('recoverAttachLatest').onclick = attachLatestRecoverJob;
 $('recoverPrecheck').onclick = () => callRecoverApi('precheck');
@@ -645,5 +757,9 @@ $('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHi
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+$('machineConnectionSelect').onchange = () => {
+  const selectedText = $('machineConnectionSelect')?.selectedOptions?.[0]?.textContent || '';
+  if ($('machineConnectionSummary')) $('machineConnectionSummary').textContent = `待切换盒子: ${selectedText || '-'}\n点击“切换到这个盒子”后生效。`;
+};
 
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
