@@ -1539,6 +1539,28 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
+    try {
+      const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+      const current = getStoredConfig();
+      const existing = getConnectionById(current, connectionId);
+      if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
+      if (!existing.privateKeyPath || !fs.existsSync(existing.privateKeyPath)) {
+        return send(res, 404, { ok: false, error: 'private key not found' });
+      }
+      const privateKey = fs.readFileSync(existing.privateKeyPath, 'utf8');
+      return send(res, 200, {
+        ok: true,
+        connectionId,
+        privateKey,
+        fingerprint: existing.privateKeyFingerprint || '',
+      });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
   if (req.method === 'POST' && u.pathname === '/api/settings/ssh-private-key') {
     try {
       const body = await parseJsonBody(req);

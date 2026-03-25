@@ -365,6 +365,14 @@ function bindConnectionListActions() {
       const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
       const hit = list.find((x) => String(x.id) === String(btn.dataset.connId));
       fillSshForm(hit || null);
+      if (hit?.id) {
+        try {
+          const keyOut = await j(`/api/settings/ssh-private-key?connectionId=${encodeURIComponent(hit.id)}`);
+          $('sshPrivateKey').value = keyOut?.privateKey || '';
+        } catch {
+          $('sshPrivateKey').value = '';
+        }
+      }
       switchPage('boxes');
       showResult('盒子信息已回填表单', { ok: true, connectionId: btn.dataset.connId });
     };
