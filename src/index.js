@@ -4,6 +4,7 @@ import https from 'node:https';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { applyActiveConnection } from './config-store.js';
 
 function requestText(target, { method = 'GET', timeout = 5000 } = {}) {
   return new Promise((resolve) => {
@@ -115,7 +116,8 @@ function safeReadJson(file, fallback = null) {
 }
 
 function getConfig(configPath) {
-  return loadJsonIfExists(configPath) || {};
+  const raw = loadJsonIfExists(configPath) || {};
+  return applyActiveConnection(raw);
 }
 
 function getNested(obj, keys, fallback = null) {
