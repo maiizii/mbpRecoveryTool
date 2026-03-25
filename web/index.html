@@ -15,6 +15,7 @@
       </div>
       <nav class="menu">
         <button class="menu-btn active" data-page="boxes">盒子管理</button>
+        <button class="menu-btn" data-page="machines">机位管理</button>
         <button class="menu-btn" data-page="baselines">基座管理</button>
         <button class="menu-btn" data-page="users">用户检索</button>
         <button class="menu-btn" data-page="recover">恢复任务</button>
@@ -60,7 +61,7 @@
             </div>
             <div class="full">
               <label>私钥内容（必填）</label>
-              <textarea id="sshPrivateKey" rows="10" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+              <textarea id="sshPrivateKey" class="editor secret-editor" rows="14" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
               <div class="muted topgap">盒子 IP / 端口 / 用户 / 私钥建议一次录入，一次保存。</div>
             </div>
             <div class="full actions">
@@ -76,10 +77,12 @@
             </div>
           </div>
         </div>
+      </section>
 
+      <section class="page" data-page="machines">
         <div class="panel">
-          <h2>机位总览</h2>
-          <div class="muted">当前先保留原有机位/容器操作能力，方便现阶段继续使用。</div>
+          <h2>机位管理</h2>
+          <div class="muted">集中查看机位、容器运行状态，并直接执行启停/切换操作。</div>
           <div id="slots" class="slots topgap"></div>
         </div>
       </section>
@@ -90,7 +93,7 @@
           <div class="grid2">
             <div class="full">
               <label>可用基座列表（每行一个）</label>
-              <textarea id="baselineOptions" rows="10" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
+              <textarea id="baselineOptions" class="editor baseline-editor" rows="14" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
             </div>
             <div class="full actions">
               <button id="saveBaselines">保存基座列表</button>

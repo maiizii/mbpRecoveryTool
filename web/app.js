@@ -5,7 +5,8 @@ let slotRows = [];
 let currentRecoverJobId = '';
 let recoverPollTimer = null;
 const pageMeta = {
-  boxes: { title: '盒子管理', desc: '添加盒子、配置 SSH 私钥，并查看机位与容器运行状态。' },
+  boxes: { title: '盒子管理', desc: '录入盒子连接信息与私钥，统一管理当前活动盒子。' },
+  machines: { title: '机位管理', desc: '集中查看机位与容器状态，并直接执行启停/切换操作。' },
   baselines: { title: '基座管理', desc: '管理当前可用的基座列表；后续再演进成按盒子分别管理。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
   recover: { title: '恢复任务', desc: '按顺序选择：用户 → 基座 → 机位 → 容器，并检查是否匹配。' },
