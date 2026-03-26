@@ -190,6 +190,10 @@ export function writePrivateKey({ connectionId, privateKey, sshSecretsDir = DEFA
 export function ensureConnectionPrivateKeyFile(config = {}, connectionId = '', { sshSecretsDir = DEFAULT_SSH_SECRETS_DIR } = {}) {
   const next = mergeConfig(createDefaultConfig(), config || {});
   const pickedId = String(connectionId || next?.ssh?.activeConnectionId || '').trim();
+
+  // 关键：显式指定了 connectionId 时，要让本次运行使用该连接作为 activeConnection
+  if (pickedId) next.ssh.activeConnectionId = pickedId;
+
   const connection = getConnectionById(next, pickedId) || getActiveConnection(next);
   if (!connection) return { ok: false, error: '未找到盒子配置' };
 
@@ -212,7 +216,8 @@ export function ensureConnectionPrivateKeyFile(config = {}, connectionId = '', {
     privateKeyFingerprint: result.fingerprint,
     hasPrivateKey: true,
   });
-  if (!updatedConfig.ssh.activeConnectionId) updatedConfig.ssh.activeConnectionId = connection.id;
+  // 本次重建/写入后也强制使用当前 connection 作为 activeConnection
+  updatedConfig.ssh.activeConnectionId = connection.id;
   return {
     ok: true,
     config: applyActiveConnection(updatedConfig),

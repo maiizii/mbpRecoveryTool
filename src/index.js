@@ -426,10 +426,12 @@ function pickSshRuntime(cfg = {}) {
 
 function ensureActiveSshKeyFile(config = {}) {
   const active = getActiveConnection(config || {});
-  if (!active?.id) return { ok: true, config };
+  const pickedId = String(config?.recover?.connectionId || active?.id || '').trim();
+  if (!pickedId) return { ok: true, config };
 
   // ensureConnectionPrivateKeyFile 会在私钥文件缺失时自动重建，并返回带有最新 privateKeyPath 的 config
-  const ensured = ensureConnectionPrivateKeyFile(config, active.id);
+  // 这里必须优先用 recover.connectionId（用户在 UI 选的盒子），否则会误用 activeConnectionId
+  const ensured = ensureConnectionPrivateKeyFile(config, pickedId);
   if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
 
   return { ok: true, config: ensured.config || config };
