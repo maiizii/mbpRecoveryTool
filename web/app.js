@@ -796,12 +796,14 @@ $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetNam
 $('machineConnectionSelect').onchange = async () => {
   const connectionId = $('machineConnectionSelect')?.value || '';
   if (!connectionId) return;
-  await activateConnectionById(connectionId, { silent: true });
   const selectedText = $('machineConnectionSelect')?.selectedOptions?.[0]?.textContent || '';
+  await activateConnectionById(connectionId, { silent: true });
   if ($('machineConnectionSummary')) {
     $('machineConnectionSummary').textContent = `当前盒子已切换: ${selectedText || '-'}\n机位已自动刷新。`;
   }
-  await saveRecoverConfig({}, { silent: true });
+  // 显式写入本次选择的 connectionId，不能依赖 loadConfig 后重新读取下拉框，
+  // 否则会被旧的 recover.connectionId 顶回去。
+  await saveRecoverConfig({ connectionId }, { silent: true });
 };
 $('userConnectionSelect').onchange = () => saveRecoverConfig({}, { silent: true });
 
