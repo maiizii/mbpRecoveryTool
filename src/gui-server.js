@@ -1571,6 +1571,27 @@ function resolveRecoverMbp(cfg = {}, body = {}) {
   return hit?.workingMbp || hit?.sourceMbp || cfg?.recover?.detected?.workingMbp || cfg?.recover?.detected?.recoverMbp || cfg?.recover?.detected?.sourceMbp || '';
 }
 
+function persistRecoverPayload(body = {}) {
+  const current = getStoredConfig();
+  const next = {
+    ...current,
+    recover: {
+      ...(current.recover || {}),
+      ...(body || {}),
+      baselineIdentity: {
+        ...(current?.recover?.baselineIdentity || {}),
+        ...((body || {}).baselineIdentity || {}),
+      },
+      detected: {
+        ...(current?.recover?.detected || {}),
+        ...((body || {}).detected || {}),
+      },
+    },
+  };
+  saveAppConfig(next, CONFIG_PATH);
+  return next;
+}
+
 function buildRecoverArgs(configPath, mode, body = {}) {
   const cfg = readJson(configPath, {});
   const args = [mode, `--config=${configPath}`];
@@ -1867,6 +1888,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'precheck', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {
@@ -1882,6 +1904,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'recover-plan', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {
@@ -1897,6 +1920,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const cfg = readJson(CONFIG_PATH, {});
         const normalizedBody = { ...body, mbp: resolveRecoverMbp(cfg, body) };
         const job = createRecoverJob(normalizedBody);
@@ -1962,6 +1986,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'recover-dryrun', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {
