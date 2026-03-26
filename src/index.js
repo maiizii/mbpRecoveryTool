@@ -563,7 +563,7 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
     `EXTRACT_ROOT=${shellQuote(ws.extractRoot)}`,
     'if [ ! -f "$SRC" ]; then echo MBP_MISSING=$SRC; exit 21; fi',
     'mkdir -p "$TASK_DIR"',
-    'cp -f "$SRC" "$REMOTE_MBP"',
+    'if [ "$SRC" = "$REMOTE_MBP" ]; then echo SKIP_COPY_SAME_FILE=1; else cp -f "$SRC" "$REMOTE_MBP"; fi',
     'rm -rf "$EXTRACT_ROOT"',
     'mkdir -p "$EXTRACT_ROOT"',
     'tar -xzf "$REMOTE_MBP" -C "$EXTRACT_ROOT"',
