@@ -861,7 +861,7 @@ function validateRecoverRuntimeAssets(config = {}) {
     { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_inject_user_layer.sh') },
     { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_precise_postinject_scan.sh') },
     { kind: 'checklist', file: resolveChecklistLocalPath(config) },
-    { kind: 'proxy-mapping', file: resolveProxyMappingFile(config) },
+    { kind: 'proxy-mapping', file: resolveProxyMappingPath(config) },
   ];
   const missing = required.filter((x) => !x.file || !fs.existsSync(x.file));
   return { ok: missing.length === 0, required, missing };
