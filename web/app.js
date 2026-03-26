@@ -801,12 +801,9 @@ $('machineConnectionSelect').onchange = async () => {
   if ($('machineConnectionSummary')) {
     $('machineConnectionSummary').textContent = `当前盒子已切换: ${selectedText || '-'}\n机位已自动刷新。`;
   }
+  await saveRecoverConfig({}, { silent: true });
 };
 $('userConnectionSelect').onchange = () => saveRecoverConfig({}, { silent: true });
-
-fillSshForm(null);
-loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
-lect').onchange = () => saveRecoverConfig({}, { silent: true });
 
 fillSshForm(null);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
