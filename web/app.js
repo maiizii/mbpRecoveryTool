@@ -276,6 +276,7 @@ function renderConnectionList(cfg = {}) {
   const activeId = cfg?.ssh?.activeConnectionId || '';
   const boxWrap = $('sshConnectionList');
   const machineSelect = $('machineConnectionSelect');
+  const userSelect = $('userConnectionSelect');
   const machineSummary = $('machineConnectionSummary');
 
   if (machineSelect) {
@@ -283,6 +284,15 @@ function renderConnectionList(cfg = {}) {
       machineSelect,
       list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
       activeId,
+    );
+  }
+
+  if (userSelect) {
+    const preferredUserConnectionId = cfg?.recover?.connectionId || activeId;
+    setSelectOptions(
+      userSelect,
+      list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
+      preferredUserConnectionId,
     );
   }
 
@@ -370,14 +380,8 @@ function bindConnectionListActions() {
       const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
       const hit = list.find((x) => String(x.id) === String(btn.dataset.connId));
       fillSshForm(hit || null);
-      if (hit?.id) {
-        try {
-          const keyOut = await j(`/api/settings/ssh-private-key?connectionId=${encodeURIComponent(hit.id)}`);
-          $('sshPrivateKey').value = keyOut?.privateKey || '';
-        } catch {
-          $('sshPrivateKey').value = '';
-        }
-      }
+      // 安全设计：私钥内容不回填（避免泄露）。如需更新私钥，请重新粘贴并保存。
+      $('sshPrivateKey').value = '';
       switchPage('boxes', { keepSshFormState: true });
       showResult('盒子信息已回填表单', { ok: true, connectionId: btn.dataset.connId });
     };
@@ -441,6 +445,7 @@ async function loadConfig() {
   $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
+  if ($('userConnectionSelect')) $('userConnectionSelect').value = cfg.recover?.connectionId || cfg.ssh?.activeConnectionId || '';
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
@@ -522,6 +527,7 @@ async function saveSshConnection() {
     sshPort: port,
     sshUser: user,
     managementPort,
+    privateKey,
     boxBase: `http://${host}:${managementPort}`,
     boxWorkRoot: '/mmc/myt_recover_work',
     setActive: true,
@@ -532,26 +538,15 @@ async function saveSshConnection() {
     body: JSON.stringify(payload),
   });
 
-  const connectionId = out?.connectionId || payload.id;
-  if (!connectionId) {
-    showResult('保存盒子失败', { error: '盒子已保存，但未拿到 connectionId，无法继续保存私钥' });
-    return;
-  }
-
-  const keyOut = await j('/api/settings/ssh-private-key', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ connectionId, privateKey }),
-  });
-
   await loadConfig();
   fillSshForm(null);
-  showResult('盒子与私钥已保存，表单已重置为新增模式', { ok: true, connectionId, box: out, privateKey: keyOut });
+  showResult('盒子与私钥已保存，表单已重置为新增模式', { ok: true, connectionId: out?.connectionId || payload.id, box: out });
 }
 
 function getRecoverPayload() {
   return {
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
+    connectionId: $('userConnectionSelect')?.value?.trim?.() || '',
     baseline: $('recoverBaseline')?.value?.trim?.() || '',
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
@@ -589,16 +584,21 @@ async function refreshSlots() {
 async function detectUser() {
   const payload = {
     userId: $('recoverUserId').value.trim(),
+    connectionId: $('userConnectionSelect')?.value?.trim?.() || '',
   };
   if (!payload.userId) {
     showResult('用户检索', { error: '请先填写目标 UID' });
+    return;
+  }
+  if (!payload.connectionId) {
+    showResult('用户检索', { error: '请先选择盒子' });
     return;
   }
   const btn = $('detectUser');
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '检索中...';
-  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
+  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n盒子: ${$('userConnectionSelect')?.selectedOptions?.[0]?.textContent || payload.connectionId}\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
   $('raw').textContent = '';
   $('summary').textContent = '用户检索\n\n请求已发出，正在执行中……';
 
@@ -615,7 +615,7 @@ async function detectUser() {
     if (!out.ok) {
       const msg = out?.parsed?.message || out?.error || '检索失败';
       $('userDetectSummary').textContent = `用户检索失败\n${msg}`;
-      await saveRecoverConfig({ userId: payload.userId, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
+      await saveRecoverConfig({ userId: payload.userId, connectionId: payload.connectionId, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
     } else if (out.ok && status === 'source_only') {
       const msg = [
         `已定位到 MBP，但基础数据不足：${payload.userId}`,
@@ -623,7 +623,7 @@ async function detectUser() {
         `源MBP: ${info?.sourceMbp || '-'}`,
       ].join('\n');
       $('userDetectSummary').textContent = msg;
-      await saveRecoverConfig({ userId: info?.userId || payload.userId, detectedSummary: msg, detected: info }, { silent: true });
+      await saveRecoverConfig({ userId: info?.userId || payload.userId, connectionId: payload.connectionId, detectedSummary: msg, detected: info }, { silent: true });
     } else if (info) {
       const lines = [
         `目标UID: ${info.userId || '-'}`,
@@ -643,6 +643,7 @@ async function detectUser() {
       ];
       cfg.recover = cfg.recover || {};
       cfg.recover.userId = info.userId || payload.userId;
+      cfg.recover.connectionId = payload.connectionId;
       cfg.recover.detectedSummary = lines.join('\n');
       cfg.recover.detected = info;
       cfg.recover.detectedUsers = upsertDetectedUser(cfg, info);
@@ -797,7 +798,7 @@ $('machineConnectionSelect').onchange = async () => {
     $('machineConnectionSummary').textContent = `当前盒子已切换: ${selectedText || '-'}\n机位已自动刷新。`;
   }
 };
+$('userConnectionSelect').onchange = () => saveRecoverConfig({}, { silent: true });
 
 fillSshForm(null);
-loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);

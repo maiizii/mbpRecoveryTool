@@ -113,9 +113,10 @@ export function normalizeConnection(input = {}) {
     managementPort: Number(input.managementPort || 0) || 0,
     boxBase: String(input.boxBase || '').trim(),
     boxWorkRoot: String(input.boxWorkRoot || '').trim(),
+    privateKey: String(input.privateKey || '').replace(/\r\n/g, '\n').trim(),
     privateKeyPath: String(input.privateKeyPath || '').trim(),
     privateKeyFingerprint: String(input.privateKeyFingerprint || '').trim(),
-    hasPrivateKey: Boolean(input.hasPrivateKey || input.privateKeyPath),
+    hasPrivateKey: Boolean(input.hasPrivateKey || input.privateKeyPath || input.privateKey),
     updatedAt: String(input.updatedAt || '').trim(),
   };
 }
@@ -124,8 +125,9 @@ export function sanitizeConnection(connection = {}) {
   const c = normalizeConnection(connection);
   return {
     ...c,
+    privateKey: c.privateKey ? '[stored]' : '',
     privateKeyPath: c.privateKeyPath ? maskPath(c.privateKeyPath) : '',
-    hasPrivateKey: Boolean(c.privateKeyPath || c.hasPrivateKey),
+    hasPrivateKey: Boolean(c.privateKeyPath || c.hasPrivateKey || c.privateKey),
   };
 }
 
@@ -182,6 +184,42 @@ export function writePrivateKey({ connectionId, privateKey, sshSecretsDir = DEFA
   return {
     path: target,
     fingerprint: `SHA256:${fingerprint}`,
+  };
+}
+
+export function ensureConnectionPrivateKeyFile(config = {}, connectionId = '', { sshSecretsDir = DEFAULT_SSH_SECRETS_DIR } = {}) {
+  const next = mergeConfig(createDefaultConfig(), config || {});
+  const pickedId = String(connectionId || next?.ssh?.activeConnectionId || '').trim();
+  const connection = getConnectionById(next, pickedId) || getActiveConnection(next);
+  if (!connection) return { ok: false, error: '未找到盒子配置' };
+
+  const existingPath = String(connection.privateKeyPath || '').trim();
+  if (existingPath && fs.existsSync(existingPath)) {
+    return { ok: true, config: applyActiveConnection(next), connection, keyPath: existingPath, created: false };
+  }
+
+  const privateKey = String(connection.privateKey || '').replace(/\r\n/g, '\n').trim();
+  if (!privateKey) {
+    return { ok: false, error: `盒子 ${connection.name || connection.id || ''} 未保存私钥内容，无法重建私钥文件`, connection };
+  }
+
+  const result = writePrivateKey({ connectionId: connection.id, privateKey, sshSecretsDir });
+  const { config: updatedConfig, connection: updatedConnection } = upsertConnection(next, {
+    ...connection,
+    id: connection.id,
+    privateKey,
+    privateKeyPath: result.path,
+    privateKeyFingerprint: result.fingerprint,
+    hasPrivateKey: true,
+  });
+  if (!updatedConfig.ssh.activeConnectionId) updatedConfig.ssh.activeConnectionId = connection.id;
+  return {
+    ok: true,
+    config: applyActiveConnection(updatedConfig),
+    connection: updatedConnection,
+    keyPath: result.path,
+    fingerprint: result.fingerprint,
+    created: true,
   };
 }
 

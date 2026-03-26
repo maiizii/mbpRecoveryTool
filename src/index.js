@@ -4,7 +4,7 @@ import https from 'node:https';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { applyActiveConnection } from './config-store.js';
+import { applyActiveConnection, ensureConnectionPrivateKeyFile, getActiveConnection } from './config-store.js';
 
 function requestText(target, { method = 'GET', timeout = 5000 } = {}) {
   return new Promise((resolve) => {
@@ -411,19 +411,34 @@ async function callInstanceProxyCmdViaBox({ config = {}, instanceApi = '', query
   return { ok: out.ok && status.startsWith('2'), status: Number(status || 0), body: bodyText, json, stdout, stderr: out.stderr || '', url: target };
 }
 
-function pickSshRuntime(config = {}) {
-  const ssh = config?.ssh || {};
+function pickSshRuntime(cfg = {}) {
+  const active = getActiveConnection(cfg || {});
+  const ssh = cfg?.ssh || {};
+  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1' || Boolean(active?.privateKeyPath);
   return {
-    enabled: ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1',
-    host: String(ssh.host || process.env.MYT_BOX_SSH_HOST || 'mylo.gote.top').trim(),
-    port: Number(ssh.port || process.env.MYT_BOX_SSH_PORT || 23191),
-    user: String(ssh.user || process.env.MYT_BOX_SSH_USER || 'root').trim(),
-    key: String(ssh.key || process.env.MYT_BOX_SSH_KEY || '/root/.ssh/MYT1_ed25519').trim(),
+    enabled,
+    host: String(ssh.host || active?.sshHost || process.env.MYT_BOX_SSH_HOST || '').trim(),
+    port: Number(ssh.port || active?.sshPort || process.env.MYT_BOX_SSH_PORT || 22),
+    user: String(ssh.user || active?.sshUser || process.env.MYT_BOX_SSH_USER || 'root').trim(),
+    key: String(ssh.key || active?.privateKeyPath || process.env.MYT_BOX_SSH_KEY || '').trim(),
   };
 }
 
+function ensureActiveSshKeyFile(config = {}) {
+  const active = getActiveConnection(config || {});
+  if (!active?.id) return { ok: true, config };
+
+  // ensureConnectionPrivateKeyFile 会在私钥文件缺失时自动重建，并返回带有最新 privateKeyPath 的 config
+  const ensured = ensureConnectionPrivateKeyFile(config, active.id);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+
+  return { ok: true, config: ensured.config || config };
+}
+
 async function runSshCmd(config = {}, command = '') {
-  const ssh = pickSshRuntime(config);
+  const ensured = ensureActiveSshKeyFile(config);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+  const ssh = pickSshRuntime(ensured.config);
   if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
   return runLocalCmd('ssh', [
     '-i', ssh.key,
@@ -485,7 +500,9 @@ async function replaceBaselineOverSsh({ config = {}, targetName = '', baseline =
 }
 
 async function scpToBox(config = {}, localFile = '', remoteFile = '') {
-  const ssh = pickSshRuntime(config);
+  const ensured = ensureActiveSshKeyFile(config);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+  const ssh = pickSshRuntime(ensured.config);
   if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
   if (!localFile || !fs.existsSync(localFile)) return { ok: false, error: 'local file not found' };
   return runLocalCmd('scp', [

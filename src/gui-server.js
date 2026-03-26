@@ -23,6 +23,7 @@ import {
   upsertConnection,
   deleteConnection,
   writePrivateKey,
+  ensureConnectionPrivateKeyFile,
 } from './config-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -240,6 +241,21 @@ function getStoredConfig() {
 
 function getRuntimeConfig() {
   return applyActiveConnection(getStoredConfig());
+}
+
+function withConnectionContext(cfg = {}, connectionId = '') {
+  const next = { ...(cfg || {}), ssh: { ...((cfg || {}).ssh || {}) } };
+  const picked = String(connectionId || '').trim();
+  if (picked) next.ssh.activeConnectionId = picked;
+  return next;
+}
+
+function ensureConnectionReady(cfg = {}, connectionId = '') {
+  const scoped = withConnectionContext(cfg, connectionId);
+  const ensured = ensureConnectionPrivateKeyFile(scoped, connectionId);
+  if (!ensured.ok) return ensured;
+  saveAppConfig(ensured.config, CONFIG_PATH);
+  return ensured;
 }
 
 function getPublicConfig() {
@@ -536,7 +552,7 @@ async function cleanupRemoteRecoverWorkspace({ config = {}, userId = '' }) {
 function pickSshRuntime(cfg = {}) {
   const runtimeCfg = applyActiveConnection(cfg || {});
   const ssh = runtimeCfg?.ssh || {};
-  const active = getActiveConnection(cfg || {});
+  const active = getActiveConnection(runtimeCfg || cfg || {});
   const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1' || Boolean(active?.privateKeyPath);
   return {
     enabled,
@@ -1461,9 +1477,39 @@ async function readDetectData(userId, cfg = {}, prepared = {}, preferredTargetNa
   };
 }
 
-async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '') {
+async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '', connectionId = '') {
   const stages = [];
-  const prepared = await prepareLocalDetectArtifacts(userId, cfg, preferredSource, preferredTargetName, preferredSlot);
+  const scopedCfg = withConnectionContext(cfg, connectionId);
+  const ensured = ensureConnectionReady(scopedCfg, connectionId);
+
+  stages.push({
+    key: 'ensure_ssh_key',
+    label: '确认盒子私钥文件',
+    status: ensured.ok ? 'done' : 'failed',
+    detail: ensured.ok
+      ? (ensured.created ? `已重建私钥文件: ${ensured.keyPath}` : `直接复用私钥文件: ${ensured.keyPath}`)
+      : (ensured.error || '私钥检查失败'),
+  });
+
+  if (!ensured.ok) {
+    return {
+      status: 'prepare_failed',
+      message: `盒子私钥不可用：${ensured.error || 'unknown'}`,
+      detected: {
+        userId,
+        sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+        recoverMbp: '',
+        extractRoot: '',
+        taskDir: '',
+        workingMbp: '',
+      },
+      stages,
+      diag: { ensureKey: ensured },
+    };
+  }
+
+  const runtimeCfg = ensured.config || scopedCfg;
+  const prepared = await prepareLocalDetectArtifacts(userId, runtimeCfg, preferredSource, preferredTargetName, preferredSlot);
 
   stages.push({
     key: 'prepare_source_extract',
@@ -1496,7 +1542,7 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
     };
   }
 
-  const readOut = await readDetectData(userId, cfg, prepared, preferredTargetName, preferredSlot);
+  const readOut = await readDetectData(userId, runtimeCfg, prepared, preferredTargetName, preferredSlot);
   const detected = readOut.detected;
   const hasDetails = Boolean(
     detected.username || detected.nickname || detected.name || detected.secUid || detected.proxyIp || detected.model || detected.brand || detected.androidId
@@ -1602,7 +1648,8 @@ const server = http.createServer(async (req, res) => {
       const current = getStoredConfig();
       const connectionId = String(body.id || '').trim() || generateConnectionId();
       const existing = getConnectionById(current, connectionId);
-      const { config: next, connection } = upsertConnection(current, {
+      const privateKey = String(body.privateKey || '').trim();
+      let { config: next, connection } = upsertConnection(current, {
         ...(existing || {}),
         id: connectionId,
         name: String(body.name || '').trim(),
@@ -1612,6 +1659,7 @@ const server = http.createServer(async (req, res) => {
         managementPort: Number(body.managementPort || 0) || 0,
         boxBase: String(body.boxBase || '').trim(),
         boxWorkRoot: String(body.boxWorkRoot || '').trim(),
+        privateKey: privateKey || String(existing?.privateKey || '').trim(),
       });
       if (body.setActive !== false) next.ssh.activeConnectionId = connection.id;
       saveAppConfig(next, CONFIG_PATH);
@@ -1621,57 +1669,60 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
-    try {
-      const connectionId = String(u.searchParams.get('connectionId') || '').trim();
-      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
-      const current = getStoredConfig();
-      const existing = getConnectionById(current, connectionId);
-      if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
-      if (!existing.privateKeyPath || !fs.existsSync(existing.privateKeyPath)) {
-        return send(res, 404, { ok: false, error: 'private key not found' });
-      }
-      const privateKey = fs.readFileSync(existing.privateKeyPath, 'utf8');
-      return send(res, 200, {
-        ok: true,
-        connectionId,
-        privateKey,
-        fingerprint: existing.privateKeyFingerprint || '',
-      });
-    } catch (err) {
-      return send(res, 400, { ok: false, error: err.message });
-    }
-  }
+  // if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
+  //   try {
+  //     const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+  //     if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+  //     const current = getStoredConfig();
+  //     const existing = getConnectionById(current, connectionId);
+  //     if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
+  //     let privateKey = '';
+  //     if (existing.privateKeyPath && fs.existsSync(existing.privateKeyPath)) privateKey = fs.readFileSync(existing.privateKeyPath, 'utf8');
+  //     else if (existing.privateKey) privateKey = existing.privateKey;
+  //     if (!privateKey) {
+  //       return send(res, 404, { ok: false, error: 'private key not found' });
+  //     }
+  //     return send(res, 200, {
+  //       ok: true,
+  //       connectionId,
+  //       privateKey,
+  //       fingerprint: existing.privateKeyFingerprint || '',
+  //     });
+  //   } catch (err) {
+  //     return send(res, 400, { ok: false, error: err.message });
+  //   }
+  // }
 
-  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-private-key') {
-    try {
-      const body = await parseJsonBody(req);
-      const connectionId = String(body.connectionId || '').trim();
-      const privateKey = String(body.privateKey || '').trim();
-      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
-      if (!privateKey) return send(res, 400, { ok: false, error: 'missing privateKey' });
-      const current = getStoredConfig();
-      const existing = getConnectionById(current, connectionId);
-      if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
-      const result = writePrivateKey({ connectionId, privateKey });
-      const { config: next } = upsertConnection(current, {
-        ...existing,
-        id: connectionId,
-        privateKeyPath: result.path,
-        privateKeyFingerprint: result.fingerprint,
-        hasPrivateKey: true,
-      });
-      saveAppConfig(next, CONFIG_PATH);
-      return send(res, 200, {
-        ok: true,
-        connectionId,
-        fingerprint: result.fingerprint,
-        config: getPublicConfig(),
-      });
-    } catch (err) {
-      return send(res, 400, { ok: false, error: err.message });
-    }
-  }
+  // if (req.method === 'POST' && u.pathname === '/api/settings/ssh-private-key') {
+  //   try {
+  //     const body = await parseJsonBody(req);
+  //     const connectionId = String(body.connectionId || '').trim();
+  //     const privateKey = String(body.privateKey || '').trim();
+  //     if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+  //     if (!privateKey) return send(res, 400, { ok: false, error: 'missing privateKey' });
+  //     const current = getStoredConfig();
+  //     const existing = getConnectionById(current, connectionId);
+  //     if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
+  //     const result = writePrivateKey({ connectionId, privateKey });
+  //     const { config: next } = upsertConnection(current, {
+  //       ...existing,
+  //       id: connectionId,
+  //       privateKey,
+  //       privateKeyPath: result.path,
+  //       privateKeyFingerprint: result.fingerprint,
+  //       hasPrivateKey: true,
+  //     });
+  //     saveAppConfig(next, CONFIG_PATH);
+  //     return send(res, 200, {
+  //       ok: true,
+  //       connectionId,
+  //       fingerprint: result.fingerprint,
+  //       config: getPublicConfig(),
+  //     });
+  //   } catch (err) {
+  //     return send(res, 400, { ok: false, error: err.message });
+  //   }
+  // }
 
   if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection/delete') {
     try {
@@ -1729,7 +1780,8 @@ const server = http.createServer(async (req, res) => {
         const preferredSlot = String(body.slot || '').trim();
         if (!userId) return send(res, 400, { ok: false, error: 'missing userId' });
         const cfg = readJson(CONFIG_PATH, {});
-        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot);
+        const connectionId = String(body.connectionId || '').trim();
+        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot, connectionId);
         return send(res, 200, { ok: true, parsed, detected: parsed.detected });
       } catch (err) {
         send(res, 400, { ok: false, error: err.message });
