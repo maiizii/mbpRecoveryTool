@@ -559,10 +559,6 @@ async function saveOtherSettings() {
     sdkDir: $('sdkDir').value.trim(),
     boxWorkRoot: '',
     proxyMappingFile: $('proxyMappingFile').value.trim(),
-    baselineOptions: $('baselineOptions').value
-      .split(/\r?\n/)
-      .map((x) => x.trim())
-      .filter(Boolean),
   };
   const out = await j('/api/settings/general', {
     method: 'POST',
@@ -574,15 +570,20 @@ async function saveOtherSettings() {
 }
 
 async function saveBaselines() {
+  const rows = $('baselineOptions').value
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (!rows.length) {
+    showResult('基座列表未保存', { error: '基座列表现在是空的；为避免误清空，本次已拦截保存。' });
+    return;
+  }
   const payload = {
     boxBase: '',
     sdkDir: $('sdkDir').value.trim(),
     boxWorkRoot: '',
     proxyMappingFile: $('proxyMappingFile').value.trim(),
-    baselineOptions: $('baselineOptions').value
-      .split(/\r?\n/)
-      .map((x) => x.trim())
-      .filter(Boolean),
+    baselineOptions: rows,
   };
   const out = await j('/api/settings/general', {
     method: 'POST',
