@@ -1766,7 +1766,10 @@ async function main() {
     config.recover.connectionId = connectionId;
     config.ssh.activeConnectionId = connectionId;
   }
-  const boxBase = process.env.MYT_BASE || pickArg('base', config.boxBase || 'http://127.0.0.1:30201');
+  // 注意：只设置 activeConnectionId 不会自动更新 config.boxBase；
+  // 这里显式 applyActiveConnection，确保 boxBase/ssh 参数来自所选 connection。
+  const applied = applyActiveConnection(config);
+  const boxBase = process.env.MYT_BASE || pickArg('base', applied.boxBase || config.boxBase || 'http://127.0.0.1:30201');
   const instanceApi = process.env.MYT_INSTANCE_API || pickArg('instance-api', '');
   const rpaHost = process.env.MYT_RPA_HOST || pickArg('rpa-host', '');
   const rpaPort = Number(process.env.MYT_RPA_PORT || pickArg('rpa-port', '0'));

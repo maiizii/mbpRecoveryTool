@@ -1741,13 +1741,33 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
+    try {
+      const connectionId = String(u.searchParams.get('id') || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connection id' });
+      const cfg = loadAppConfig(CONFIG_PATH);
+      const hit = getConnectionById(cfg, connectionId);
+      if (!hit) return send(res, 404, { ok: false, error: 'connection not found' });
+      if (!String(hit.privateKey || '').trim()) return send(res, 404, { ok: false, error: 'private key not stored' });
+      return send(res, 200, { ok: true, connectionId, privateKey: String(hit.privateKey || '') });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
   if (req.method === 'GET' && u.pathname === '/api/slots') {
-    const out = await runCli(['slots', `--config=${CONFIG_PATH}`]);
+    const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+    const args = ['slots', `--config=${CONFIG_PATH}`];
+    if (connectionId) args.push(`--connection-id=${connectionId}`);
+    const out = await runCli(args);
     return send(res, out.ok ? 200 : 500, out);
   }
 
   if (req.method === 'GET' && u.pathname === '/api/list') {
-    const out = await runCli(['list', `--config=${CONFIG_PATH}`]);
+    const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+    const args = ['list', `--config=${CONFIG_PATH}`];
+    if (connectionId) args.push(`--connection-id=${connectionId}`);
+    const out = await runCli(args);
     return send(res, out.ok ? 200 : 500, out);
   }
 
@@ -1758,6 +1778,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(raw || '{}');
         const args = [body.mode, `--config=${CONFIG_PATH}`];
+        if (body.connectionId) args.push(`--connection-id=${body.connectionId}`);
         if (body.slot != null && body.slot !== '') args.push(`--slot=${body.slot}`);
         if (body.targetName) args.push(`--target-name=${body.targetName}`);
         if (body.dryRun) args.push('--dry-run');

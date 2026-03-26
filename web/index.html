@@ -63,13 +63,14 @@
               <label>管理端口</label>
               <input id="managementPort" placeholder="例如 22211" />
             </div>
-            <div class="full">
-              <label>私钥内容（必填）</label>
+            <div class="full" id="sshPrivateKeyRow" style="display:none">
+              <label>私钥内容（修改时才需要）</label>
               <textarea id="sshPrivateKey" class="editor secret-editor" rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-              <div class="muted topgap">盒子 IP / 端口 / 用户 / 私钥建议一次录入，一次保存。</div>
+              <div class="muted topgap">默认不展示私钥；点“修改私钥”后才显示并允许修改。</div>
             </div>
             <div class="full actions">
-              <button id="saveSshConnection" class="secondary">保存盒子（含私钥）</button>
+              <button id="revealPrivateKey" class="secondary">修改私钥</button>
+              <button id="saveSshConnection" class="secondary">保存盒子</button>
               <button id="clearSshForm" class="secondary">清空表单</button>
             </div>
             <div class="full">
@@ -154,6 +155,10 @@
         <div class="panel">
           <h2>恢复任务</h2>
           <div class="grid2">
+            <div>
+              <label>选择盒子</label>
+              <select id="recoverConnectionSelect"></select>
+            </div>
             <div>
               <label>选择用户</label>
               <select id="recoverDetectedUser"></select>

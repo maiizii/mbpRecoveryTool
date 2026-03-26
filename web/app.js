@@ -161,6 +161,24 @@ function getDetectedUsers(cfg = {}) {
   return list.filter(x => x && (x.userId || x.uid || x.username));
 }
 
+function getSelectedRecoverConnectionId() {
+  return String(
+    $('machineConnectionSelect')?.value
+    || $('recoverConnectionSelect')?.value
+    || $('userConnectionSelect')?.value
+    || ''
+  ).trim();
+}
+
+function syncConnectionSelectors(connectionId = '') {
+  const value = String(connectionId || '').trim();
+  if (!value) return;
+  ['machineConnectionSelect', 'recoverConnectionSelect', 'userConnectionSelect'].forEach((id) => {
+    const el = $(id);
+    if (el) el.value = value;
+  });
+}
+
 function getBaselineOptions(cfg = {}) {
   const list = Array.isArray(cfg?.recover?.baselineOptions) ? cfg.recover.baselineOptions : [];
   return list.map(x => String(x || '').trim()).filter(Boolean);
@@ -182,6 +200,8 @@ function upsertDetectedUser(cfg = {}, info = {}) {
     sourceMbp: info.sourceMbp || '',
     workingMbp: info.workingMbp || '',
     extractRoot: info.extractRoot || '',
+    // 关键：绑定检索时选的盒子，避免 recover 误用别的盒子
+    connectionId: String(info.connectionId || '').trim(),
     detectedAt: new Date().toISOString(),
   });
   return next.slice(0, 50);
@@ -190,9 +210,12 @@ function upsertDetectedUser(cfg = {}, info = {}) {
 function fillDetectedUserSelectors(cfg = {}) {
   const users = getDetectedUsers(cfg);
   const preferred = cfg?.recover?.userId || '';
+  const connectionId = getSelectedRecoverConnectionId() || cfg?.recover?.connectionId || '';
+  const filtered = connectionId ? users.filter((x) => String(x.connectionId || '').trim() === String(connectionId).trim()) : users;
+
   setSelectOptions(
     $('recoverDetectedUser'),
-    users.map((x) => ({
+    filtered.map((x) => ({
       value: x.userId || x.uid,
       label: `${x.userId || x.uid} | ${x.username || '-'} | ${x.nickname || '-'} | ${x.model || '-'} | ${x.proxyIp || '-'}`,
     })),
@@ -277,25 +300,16 @@ function renderConnectionList(cfg = {}) {
   const boxWrap = $('sshConnectionList');
   const machineSelect = $('machineConnectionSelect');
   const userSelect = $('userConnectionSelect');
+  const recoverSelect = $('recoverConnectionSelect');
   const machineSummary = $('machineConnectionSummary');
 
   const preferredRecoverConnectionId = cfg?.recover?.connectionId || activeId;
 
-  if (machineSelect) {
-    setSelectOptions(
-      machineSelect,
-      list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
-      preferredRecoverConnectionId,
-    );
-  }
+  const options = list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` }));
 
-  if (userSelect) {
-    setSelectOptions(
-      userSelect,
-      list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
-      preferredRecoverConnectionId,
-    );
-  }
+  if (machineSelect) setSelectOptions(machineSelect, options, preferredRecoverConnectionId);
+  if (userSelect) setSelectOptions(userSelect, options, preferredRecoverConnectionId);
+  if (recoverSelect) setSelectOptions(recoverSelect, options, preferredRecoverConnectionId);
 
   if (!list.length) {
     if (boxWrap) boxWrap.textContent = '暂无盒子';
@@ -320,7 +334,7 @@ function renderConnectionList(cfg = {}) {
     `).join('');
   }
 
-  const active = list.find((x) => String(x.id) === String(activeId)) || list[0];
+  const active = list.find((x) => String(x.id) === String(preferredRecoverConnectionId)) || list.find((x) => String(x.id) === String(activeId)) || list[0];
   if (machineSummary) {
     machineSummary.textContent = [
       `当前盒子: ${active?.name || '-'}`,
@@ -333,7 +347,28 @@ function renderConnectionList(cfg = {}) {
   }
 }
 
+let sshKeyEditingEnabled = false;
+let currentEditingConnection = null;
+
+function showPrivateKeyEditor(on) {
+  sshKeyEditingEnabled = Boolean(on);
+  const row = $('sshPrivateKeyRow');
+  if (row) row.style.display = sshKeyEditingEnabled ? '' : 'none';
+  if (!sshKeyEditingEnabled && $('sshPrivateKey')) {
+    $('sshPrivateKey').value = '';
+    return;
+  }
+  if (sshKeyEditingEnabled && currentEditingConnection?.id && !$('sshPrivateKey').value.trim()) {
+    j(`/api/settings/ssh-private-key?id=${encodeURIComponent(currentEditingConnection.id)}`)
+      .then((out) => {
+        if (out?.ok && out?.privateKey && $('sshPrivateKey')) $('sshPrivateKey').value = out.privateKey;
+      })
+      .catch((err) => showResult('读取私钥失败', { error: String(err?.message || err) }));
+  }
+}
+
 function fillSshForm(connection = null) {
+  currentEditingConnection = connection || null;
   $('sshConnId').value = connection?.id || '';
   $('sshKeyConnectionId').value = connection?.id || '';
   $('sshConnName').value = connection?.name || '';
@@ -341,9 +376,9 @@ function fillSshForm(connection = null) {
   $('sshPort').value = connection?.sshPort || 22;
   $('sshUser').value = connection?.sshUser || 'root';
   $('managementPort').value = connection?.managementPort || '';
-  $('sshPrivateKey').value = '';
+  showPrivateKeyEditor(false);
   const btn = $('saveSshConnection');
-  if (btn) btn.textContent = connection?.id ? '保存修改（含私钥）' : '新增盒子（含私钥）';
+  if (btn) btn.textContent = connection?.id ? '保存盒子' : '新增盒子';
 }
 
 async function activateConnectionById(connectionId, opts = {}) {
@@ -381,10 +416,10 @@ function bindConnectionListActions() {
       const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
       const hit = list.find((x) => String(x.id) === String(btn.dataset.connId));
       fillSshForm(hit || null);
-      // 安全设计：私钥内容不回填（避免泄露）。如需更新私钥，请重新粘贴并保存。
-      $('sshPrivateKey').value = '';
+      // 默认不展示私钥；需要修改时点击“修改私钥”再拉取回填
+      showPrivateKeyEditor(false);
       switchPage('boxes', { keepSshFormState: true });
-      showResult('盒子信息已回填表单', { ok: true, connectionId: btn.dataset.connId });
+      showResult('盒子信息已回填表单（私钥默认隐藏）', { ok: true, connectionId: btn.dataset.connId });
     };
   });
   document.querySelectorAll('button[data-conn-action="activate"]').forEach((btn) => {
@@ -446,7 +481,10 @@ async function loadConfig() {
   $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
-  if ($('userConnectionSelect')) $('userConnectionSelect').value = cfg.recover?.connectionId || cfg.ssh?.activeConnectionId || '';
+  const preferredConnectionId = cfg.recover?.connectionId || cfg.ssh?.activeConnectionId || '';
+  if ($('userConnectionSelect')) $('userConnectionSelect').value = preferredConnectionId;
+  if ($('recoverConnectionSelect')) $('recoverConnectionSelect').value = preferredConnectionId;
+  if ($('machineConnectionSelect')) $('machineConnectionSelect').value = preferredConnectionId;
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
@@ -515,24 +553,27 @@ async function saveSshConnection() {
   const name = $('sshConnName').value.trim();
   const user = $('sshUser').value.trim() || 'root';
   const managementPort = Number($('managementPort').value.trim() || 0) || 0;
+  const editingId = $('sshConnId').value.trim();
+  const needPrivateKey = !editingId || sshKeyEditingEnabled;
 
-  if (!name || !host || !port || !user || !privateKey || !managementPort) {
-    showResult('保存盒子失败', { error: '盒子名称、IP、SSH端口、SSH用户、管理端口、私钥都是必填项' });
+  if (!name || !host || !port || !user || !managementPort || (needPrivateKey && !privateKey)) {
+    showResult('保存盒子失败', { error: needPrivateKey ? '盒子名称、IP、SSH端口、SSH用户、管理端口、私钥都是必填项' : '盒子名称、IP、SSH端口、SSH用户、管理端口都是必填项' });
     return;
   }
 
   const payload = {
-    id: $('sshConnId').value.trim(),
+    id: editingId,
     name,
     sshHost: host,
     sshPort: port,
     sshUser: user,
     managementPort,
-    privateKey,
     boxBase: `http://${host}:${managementPort}`,
     boxWorkRoot: '/mmc/myt_recover_work',
     setActive: true,
   };
+  if (needPrivateKey && privateKey) payload.privateKey = privateKey;
+
   const out = await j('/api/settings/ssh-connection', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -541,16 +582,14 @@ async function saveSshConnection() {
 
   await loadConfig();
   fillSshForm(null);
-  showResult('盒子与私钥已保存，表单已重置为新增模式', { ok: true, connectionId: out?.connectionId || payload.id, box: out });
+  showResult(needPrivateKey ? '盒子与私钥已保存' : '盒子信息已保存（私钥未改动）', { ok: true, connectionId: out?.connectionId || payload.id, box: out });
 }
 
 function getRecoverPayload() {
-  const machineConnectionId = $('machineConnectionSelect')?.value?.trim?.() || '';
-  const userConnectionId = $('userConnectionSelect')?.value?.trim?.() || '';
+  const recoverConnectionId = getSelectedRecoverConnectionId();
   return {
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
-    // 恢复执行优先跟随机位页当前盒子；若为空再回退到用户检索页盒子
-    connectionId: machineConnectionId || userConnectionId || '',
+    connectionId: recoverConnectionId,
     baseline: $('recoverBaseline')?.value?.trim?.() || '',
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
@@ -576,13 +615,15 @@ async function saveRecoverConfig(extra = {}, opts = {}) {
 }
 
 async function refreshSlots() {
-  const out = await j('/api/slots');
+  const connectionId = getSelectedRecoverConnectionId();
+  const suffix = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : '';
+  const out = await j(`/api/slots${suffix}`);
   slotRows = normalizeSlots(out);
   $('slots').innerHTML = slotRows.map(slotCard).join('') || '<div class="muted">暂无机位数据。请先在“盒子管理”里保存 SSH 信息，并确认程序自动推导出的 boxBase 可访问盒子总控接口。</div>';
   const cfg = await j('/api/config');
   fillSlotSelectors(cfg.recover?.slot || '', cfg.recover?.targetName || '');
   bindActions();
-  showResult('机位已刷新', out);
+  showResult('机位已刷新', { ...out, usingConnectionId: connectionId || '' });
 }
 
 async function detectUser() {
@@ -649,8 +690,8 @@ async function detectUser() {
       cfg.recover.userId = info.userId || payload.userId;
       cfg.recover.connectionId = payload.connectionId;
       cfg.recover.detectedSummary = lines.join('\n');
-      cfg.recover.detected = info;
-      cfg.recover.detectedUsers = upsertDetectedUser(cfg, info);
+      cfg.recover.detected = { ...info, connectionId: payload.connectionId };
+      cfg.recover.detectedUsers = upsertDetectedUser(cfg, { ...info, connectionId: payload.connectionId });
       await j('/api/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -710,7 +751,7 @@ async function doAction(mode, targetName, slot, dryRun) {
   const out = await j('/api/action', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ mode, targetName, slot, dryRun: !!dryRun }),
+    body: JSON.stringify({ mode, targetName, slot, dryRun: !!dryRun, connectionId: getSelectedRecoverConnectionId() }),
   });
   showResult(`操作完成：${mode}`, out);
   await refreshSlots();
@@ -796,16 +837,31 @@ $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetNam
 $('machineConnectionSelect').onchange = async () => {
   const connectionId = $('machineConnectionSelect')?.value || '';
   if (!connectionId) return;
-  const selectedText = $('machineConnectionSelect')?.selectedOptions?.[0]?.textContent || '';
-  await activateConnectionById(connectionId, { silent: true });
-  if ($('machineConnectionSummary')) {
-    $('machineConnectionSummary').textContent = `当前盒子已切换: ${selectedText || '-'}\n机位已自动刷新。`;
-  }
-  // 显式写入本次选择的 connectionId，不能依赖 loadConfig 后重新读取下拉框，
-  // 否则会被旧的 recover.connectionId 顶回去。
+  syncConnectionSelectors(connectionId);
+  // 机位管理页切盒子：不再自动 setActive（避免“跳一下/乱跳”）；
+  // 只保存 recover.connectionId，并按该盒子刷新机位。
+  await saveRecoverConfig({ connectionId }, { silent: true });
+  await refreshSlots();
+};
+$('userConnectionSelect').onchange = async () => {
+  const connectionId = $('userConnectionSelect')?.value || '';
+  syncConnectionSelectors(connectionId);
   await saveRecoverConfig({ connectionId }, { silent: true });
 };
-$('userConnectionSelect').onchange = () => saveRecoverConfig({}, { silent: true });
+$('recoverConnectionSelect').onchange = async () => {
+  const connectionId = $('recoverConnectionSelect')?.value || '';
+  syncConnectionSelectors(connectionId);
+  await saveRecoverConfig({ connectionId }, { silent: true });
+  // 盒子变了：用户列表要按盒子过滤，机位/容器也需要来自该盒子
+  const cfg = await j('/api/config');
+  fillDetectedUserSelectors(cfg);
+  await refreshSlots();
+};
+
+$('revealPrivateKey').onclick = async () => {
+  if (!window.confirm('即将显示并允许修改私钥内容，确认继续？')) return;
+  showPrivateKeyEditor(true);
+};
 
 fillSshForm(null);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
