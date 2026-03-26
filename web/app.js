@@ -544,9 +544,12 @@ async function saveSshConnection() {
 }
 
 function getRecoverPayload() {
+  const machineConnectionId = $('machineConnectionSelect')?.value?.trim?.() || '';
+  const userConnectionId = $('userConnectionSelect')?.value?.trim?.() || '';
   return {
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
-    connectionId: $('userConnectionSelect')?.value?.trim?.() || '',
+    // 恢复执行优先跟随机位页当前盒子；若为空再回退到用户检索页盒子
+    connectionId: machineConnectionId || userConnectionId || '',
     baseline: $('recoverBaseline')?.value?.trim?.() || '',
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
