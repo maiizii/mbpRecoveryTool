@@ -1759,6 +1759,13 @@ async function main() {
   const mode = process.argv[2] || 'probe';
   const configPath = pickArg('config', process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json'));
   const config = getConfig(configPath);
+  const connectionId = pickArg('connection-id', config?.recover?.connectionId || '');
+  if (connectionId) {
+    if (!config.recover || typeof config.recover !== 'object') config.recover = {};
+    if (!config.ssh || typeof config.ssh !== 'object') config.ssh = {};
+    config.recover.connectionId = connectionId;
+    config.ssh.activeConnectionId = connectionId;
+  }
   const boxBase = process.env.MYT_BASE || pickArg('base', config.boxBase || 'http://127.0.0.1:30201');
   const instanceApi = process.env.MYT_INSTANCE_API || pickArg('instance-api', '');
   const rpaHost = process.env.MYT_RPA_HOST || pickArg('rpa-host', '');
