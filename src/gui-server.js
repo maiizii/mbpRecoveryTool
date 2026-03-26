@@ -1382,6 +1382,85 @@ async function prepareLocalDetectArtifacts(userId, cfg = {}, preferredSource = '
   };
 }
 
+async function readDetectData(userId, cfg = {}, prepared = {}, preferredTargetName = '', preferredSlot = '') {
+  const taskDir = prepared?.taskDir || path.join(ROOT, 'tmp', 'detect-user', userId);
+  const extractDir = prepared?.extractDir || path.join(taskDir, 'extract');
+  const workingMbp = prepared?.backupMbp || prepared?.localSourceMbp || prepared?.sourceMbp || '';
+
+  let cfgDir = '';
+  const queue = [extractDir];
+  const seen = new Set();
+  while (queue.length) {
+    const dir = queue.shift();
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const names = new Set(entries.filter((x) => x.isFile()).map((x) => x.name));
+    if (names.has('cfg.json') || names.has('location.json') || names.has('baseCfg.json')) {
+      cfgDir = dir;
+      break;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.' && entry.name !== '..') {
+        queue.push(path.join(dir, entry.name));
+      }
+    }
+  }
+
+  const cfgJson = readJson(cfgDir ? path.join(cfgDir, 'cfg.json') : '', {});
+  const baseCfg = readJson(cfgDir ? path.join(cfgDir, 'baseCfg.json') : '', {});
+  const location = readJson(cfgDir ? path.join(cfgDir, 'location.json') : '', {});
+  const deviceInfo = readJson(cfgDir ? path.join(cfgDir, 'device_info.json') : '', {});
+  const pif = readJson(cfgDir ? path.join(cfgDir, 'pif.json') : '', {});
+  const telephone = readJson(cfgDir ? path.join(cfgDir, 'telephone.json') : '', {});
+  const gsms = readJson(cfgDir ? path.join(cfgDir, 'gsms.json') : '', []);
+  const awemeUser = extractUserInfoFromAwemeUserXml(extractDir);
+  const accountSetting = extractUserInfoFromAccountSettingBlk(extractDir);
+
+  const detected = mapDetectedFromLocalData({
+    userId,
+    cfg,
+    sourceMbp: prepared?.sourceMbp || '',
+    taskDir,
+    workingMbp,
+    extractDir,
+    cfgDir,
+    cfgJson,
+    location,
+    baseCfg,
+    deviceInfo,
+    gsms,
+    pif,
+    telephone,
+    awemeUser,
+    accountSetting,
+  });
+
+  return {
+    detected,
+    diag: {
+      prepared,
+      cfgDir,
+      files: {
+        cfgJson: cfgDir ? path.join(cfgDir, 'cfg.json') : '',
+        baseCfg: cfgDir ? path.join(cfgDir, 'baseCfg.json') : '',
+        location: cfgDir ? path.join(cfgDir, 'location.json') : '',
+        deviceInfo: cfgDir ? path.join(cfgDir, 'device_info.json') : '',
+        pif: cfgDir ? path.join(cfgDir, 'pif.json') : '',
+        telephone: cfgDir ? path.join(cfgDir, 'telephone.json') : '',
+        gsms: cfgDir ? path.join(cfgDir, 'gsms.json') : '',
+        awemeUserXml: awemeUser?.awemeUserXml || '',
+        accountSettingBlk: accountSetting?.accountSettingBlk || '',
+      },
+    },
+  };
+}
+
 async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '') {
   const stages = [];
   const prepared = await prepareLocalDetectArtifacts(userId, cfg, preferredSource, preferredTargetName, preferredSlot);
