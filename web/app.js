@@ -375,7 +375,7 @@ function bindConnectionListActions() {
           $('sshPrivateKey').value = '';
         }
       }
-      switchPage('boxes');
+      switchPage('boxes', { keepSshFormState: true });
       showResult('盒子信息已回填表单', { ok: true, connectionId: btn.dataset.connId });
     };
   });
@@ -796,4 +796,5 @@ $('machineConnectionSelect').onchange = async () => {
 };
 
 fillSshForm(null);
+loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);

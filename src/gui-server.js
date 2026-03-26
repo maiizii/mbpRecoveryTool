@@ -1521,8 +1521,11 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseJsonBody(req);
       const current = getStoredConfig();
+      const connectionId = String(body.id || '').trim() || generateConnectionId();
+      const existing = getConnectionById(current, connectionId);
       const { config: next, connection } = upsertConnection(current, {
-        id: String(body.id || '').trim() || generateConnectionId(),
+        ...(existing || {}),
+        id: connectionId,
         name: String(body.name || '').trim(),
         sshHost: String(body.sshHost || '').trim(),
         sshPort: Number(body.sshPort || 22) || 22,
