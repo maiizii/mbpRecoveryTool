@@ -114,7 +114,8 @@
           <div class="grid2">
             <div class="full">
               <label>可用基座列表（每行一个）</label>
-              <textarea id="baselineOptions" class="editor baseline-editor" rows="8" placeholder="/mmc/path/to/baseline-1.img&#10;/mmc/path/to/baseline-2.img"></textarea>
+              <textarea id="baselineOptions" class="editor baseline-editor" rows="8" placeholder="基座路径——旧UID——旧username——旧name&#10;/mmc/path/to/baseline-1.img——7612...——olduser——Old Name&#10;/mmc/path/to/baseline-2.img"></textarea>
+              <div class="muted topgap">格式：<code>路径——UID——username——name</code>（仅路径必填，后三项可留空）。选择基座后会自动把旧身份写入恢复配置，用于清旧身份阶段。</div>
             </div>
             <div class="full actions">
               <button id="saveBaselines">保存基座列表</button>

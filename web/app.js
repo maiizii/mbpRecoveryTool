@@ -213,7 +213,22 @@ function syncConnectionSelectors(connectionId = '') {
 
 function getBaselineOptions(cfg = {}) {
   const list = Array.isArray(cfg?.recover?.baselineOptions) ? cfg.recover.baselineOptions : [];
-  return list.map(x => String(x || '').trim()).filter(Boolean);
+  return list
+    .map((raw) => {
+      const text = String(raw || '').trim();
+      if (!text) return null;
+      const parts = text.split('——').map((x) => String(x || '').trim());
+      const path = parts[0] || '';
+      if (!path) return null;
+      return {
+        raw: text,
+        path,
+        uid: parts[1] || '',
+        username: parts[2] || '',
+        name: parts.slice(3).join('——').trim(),
+      };
+    })
+    .filter(Boolean);
 }
 
 function upsertDetectedUser(cfg = {}, info = {}) {
@@ -258,7 +273,7 @@ function fillDetectedUserSelectors(cfg = {}) {
 function renderBaselineSummary(cfg = {}) {
   const baselines = getBaselineOptions(cfg);
   $('baselineSummary').textContent = baselines.length
-    ? baselines.map((x, i) => `${i + 1}. ${x}`).join('\n')
+    ? baselines.map((x, i) => `${i + 1}. ${x.path} | oldUid=${x.uid || '-'} | oldUsername=${x.username || '-'} | oldName=${x.name || '-'}`).join('\n')
     : '尚未配置基座';
 }
 
@@ -266,10 +281,10 @@ function fillBaselineSelectors(cfg = {}) {
   const baselines = getBaselineOptions(cfg);
   setSelectOptions(
     $('recoverBaseline'),
-    baselines.map((x) => ({ value: x, label: x })),
+    baselines.map((x) => ({ value: x.path, label: `${x.path} | oldUid=${x.uid || '-'} | ${x.username || '-'} | ${x.name || '-'}` })),
     cfg?.recover?.baseline || '',
   );
-  $('baselineOptions').value = baselines.join('\n');
+  $('baselineOptions').value = baselines.map((x) => x.raw).join('\n');
   renderBaselineSummary(cfg);
 }
 
@@ -617,12 +632,37 @@ async function saveSshConnection() {
   showResult(needPrivateKey ? '盒子与私钥已保存' : '盒子信息已保存（私钥未改动）', { ok: true, connectionId: out?.connectionId || payload.id, box: out });
 }
 
+function getSelectedBaselineMeta() {
+  const selected = String($('recoverBaseline')?.value || '').trim();
+  const lines = String($('baselineOptions')?.value || '')
+    .split(/\r?\n/)
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .map((raw) => {
+      const parts = raw.split('——').map((x) => String(x || '').trim());
+      return {
+        raw,
+        path: parts[0] || '',
+        uid: parts[1] || '',
+        username: parts[2] || '',
+        name: parts.slice(3).join('——').trim(),
+      };
+    });
+  return lines.find((x) => x.path === selected) || { path: selected, uid: '', username: '', name: '' };
+}
+
 function getRecoverPayload() {
   const recoverConnectionId = getSelectedRecoverConnectionId();
+  const baselineMeta = getSelectedBaselineMeta();
   return {
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
     connectionId: recoverConnectionId,
-    baseline: $('recoverBaseline')?.value?.trim?.() || '',
+    baseline: baselineMeta.path || '',
+    baselineIdentity: {
+      uid: baselineMeta.uid || '',
+      username: baselineMeta.username || '',
+      name: baselineMeta.name || '',
+    },
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
     mbp: '',
