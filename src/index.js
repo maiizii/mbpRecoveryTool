@@ -630,7 +630,11 @@ function resolveBoxRecoverWorkspace(config = {}, userId = '') {
 async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', log }) {
   const ws = resolveBoxRecoverWorkspace(config, userId);
   const rawMbp = String(mbp || '').trim();
-  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/')) ? ws.sourceMbp : rawMbp;
+  const workRoot = resolveBoxWorkRoot(config);
+  const isEphemeralRemoteMbp = rawMbp.startsWith(`${workRoot}/`) || rawMbp === ws.remoteMbp;
+  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/') || isEphemeralRemoteMbp)
+    ? ws.sourceMbp
+    : rawMbp;
   if (log) log(`DEBUG[prepareRemoteMbpArtifacts]: rawMbp=${rawMbp || '-'} -> sourceMbp=${sourceMbp}`);
   const cmd = [
     'set -eu',
