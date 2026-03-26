@@ -810,11 +810,20 @@ function getRecoverIdentityArgs(config = {}) {
   ];
 }
 
+function firstExistingPath(paths = []) {
+  for (const p of paths) {
+    const v = String(p || '').trim();
+    if (v && fs.existsSync(v)) return v;
+  }
+  return String(paths[0] || '').trim();
+}
+
 function resolveChecklistLocalPath(config = {}) {
-  return String(
-    config?.recover?.oldIdentityChecklist
-    || path.resolve(process.cwd(), 'tmp', 'checklists', 'old-identity-checklist-v1.tsv')
-  ).trim();
+  return firstExistingPath([
+    config?.recover?.oldIdentityChecklist,
+    path.resolve(process.cwd(), 'data', 'checklists', 'old-identity-checklist-v1.tsv'),
+    path.resolve(process.cwd(), 'tmp', 'checklists', 'old-identity-checklist-v1.tsv'),
+  ]);
 }
 
 function resolveChecklistRemotePath(config = {}) {
@@ -822,18 +831,35 @@ function resolveChecklistRemotePath(config = {}) {
   return `/tmp/${name}`;
 }
 
-async function ensureRemoteRecoverScripts({ config = {}, log }) {
-  const localBase = path.resolve(process.cwd(), 'tmp', 'live-run');
-  const mapping = [
-    ['slot1_targeted_cleanup.sh', '/tmp/slot1_targeted_cleanup.sh'],
-    ['slot1_inject_user_layer.sh', '/tmp/slot1_inject_user_layer.sh'],
-    ['slot1_precise_postinject_scan.sh', '/tmp/slot1_precise_postinject_scan.sh'],
-    [path.relative(localBase, resolveChecklistLocalPath(config)), resolveChecklistRemotePath(config)],
+function resolveRecoverScriptLocalPath(name = '') {
+  return firstExistingPath([
+    path.resolve(process.cwd(), 'scripts', 'recover', name),
+    path.resolve(process.cwd(), 'tmp', 'live-run', name),
+  ]);
+}
+
+function validateRecoverRuntimeAssets(config = {}) {
+  const required = [
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_targeted_cleanup.sh') },
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_inject_user_layer.sh') },
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_precise_postinject_scan.sh') },
+    { kind: 'checklist', file: resolveChecklistLocalPath(config) },
+    { kind: 'proxy-mapping', file: resolveProxyMappingFile(config) },
   ];
-  for (const [name, remote] of mapping) {
-    const local = path.join(localBase, name);
-    if (!fs.existsSync(local)) {
-      return { ok: false, error: `脚本不存在: ${local}` };
+  const missing = required.filter((x) => !x.file || !fs.existsSync(x.file));
+  return { ok: missing.length === 0, required, missing };
+}
+
+async function ensureRemoteRecoverScripts({ config = {}, log }) {
+  const mapping = [
+    [resolveRecoverScriptLocalPath('slot1_targeted_cleanup.sh'), '/tmp/slot1_targeted_cleanup.sh', 'slot1_targeted_cleanup.sh'],
+    [resolveRecoverScriptLocalPath('slot1_inject_user_layer.sh'), '/tmp/slot1_inject_user_layer.sh', 'slot1_inject_user_layer.sh'],
+    [resolveRecoverScriptLocalPath('slot1_precise_postinject_scan.sh'), '/tmp/slot1_precise_postinject_scan.sh', 'slot1_precise_postinject_scan.sh'],
+    [resolveChecklistLocalPath(config), resolveChecklistRemotePath(config), path.basename(resolveChecklistLocalPath(config) || 'old-identity-checklist-v1.tsv')],
+  ];
+  for (const [local, remote, name] of mapping) {
+    if (!local || !fs.existsSync(local)) {
+      return { ok: false, error: `运行依赖不存在: ${local || name}` };
     }
     log(`同步远端脚本：${name}`);
     const pushed = await scpToBox(config, local, remote);
@@ -1367,7 +1393,12 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
   if (!pre.summary.ok) report.blockers.push('precheck 未通过，不能进入恢复执行');
   report.risks = [...(pre.risks || [])];
 
-  emit({ type: 'job', status: 'started', dryRun, targetName, slot, userId, baseline, mbp });
+  const runtimeAssets = validateRecoverRuntimeAssets(config);
+  if (!runtimeAssets.ok) {
+    report.blockers.push(`recover 运行依赖缺失: ${runtimeAssets.missing.map((x) => x.file || x.kind).join(', ')}`);
+  }
+
+  emit({ type: 'job', status: 'started', dryRun, targetName, slot, userId, baseline, mbp, runtimeAssets });
 
   if (dryRun || report.blockers.length) {
     if (report.blockers.length) report.message = '前置检查未通过，当前仅返回计划';
