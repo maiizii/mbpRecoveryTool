@@ -1579,11 +1579,13 @@ function buildRecoverArgs(configPath, mode, body = {}) {
   const baseline = body.baseline || cfg?.recover?.baseline || '';
   const mbp = resolveRecoverMbp(cfg, body);
   const userId = body.userId || cfg?.recover?.userId || '';
+  const connectionId = body.connectionId || cfg?.recover?.connectionId || '';
   if (targetName) args.push(`--target-name=${targetName}`);
   if (slot != null && String(slot).trim() !== '') args.push(`--slot=${String(slot).trim()}`);
   if (baseline) args.push(`--baseline=${baseline}`);
   if (mbp) args.push(`--mbp=${mbp}`);
   if (userId) args.push(`--user-id=${userId}`);
+  if (connectionId) args.push(`--connection-id=${connectionId}`);
   return args;
 }
 
