@@ -13,11 +13,14 @@ const pageMeta = {
   others: { title: '其他设置', desc: '暂存当前不属于前几个模块的设置项，后续继续收敛。' },
 };
 
-function switchPage(page) {
+function switchPage(page, opts = {}) {
   document.querySelectorAll('.menu-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.page === page));
   document.querySelectorAll('.page').forEach((el) => el.classList.toggle('active', el.dataset.page === page));
   $('pageTitle').textContent = pageMeta[page]?.title || 'MYT 恢复工具';
   $('pageDesc').textContent = pageMeta[page]?.desc || '';
+  if (page === 'boxes' && !opts.keepSshFormState) {
+    fillSshForm(null);
+  }
 }
 
 function summarizeMessage(data) {
