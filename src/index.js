@@ -336,6 +336,19 @@ function runLocalCmd(bin, args, options = {}) {
   });
 }
 
+function stripSshNoise(text = '') {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter((x) => x && !/^Warning: Permanently added .* to the list of known hosts\.?$/i.test(x))
+    .join('\n')
+    .trim();
+}
+
+function summarizeCmdError(out = {}, fallback = 'command failed') {
+  return stripSshNoise(out.stderr || '') || String(out.stdout || '').trim() || String(out.error || '').trim() || fallback;
+}
+
 function shellQuote(s = '') {
   return `'${String(s).replace(/'/g, `"'"'`)}'`;
 }
@@ -512,6 +525,7 @@ async function runSshCmd(config = {}, command = '') {
     '-o', 'PasswordAuthentication=no',
     '-o', 'KbdInteractiveAuthentication=no',
     '-o', 'ConnectTimeout=8',
+    '-o', 'LogLevel=ERROR',
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',
     `${ssh.user}@${ssh.host}`,
@@ -577,6 +591,7 @@ async function scpToBox(config = {}, localFile = '', remoteFile = '') {
     '-o', 'PasswordAuthentication=no',
     '-o', 'KbdInteractiveAuthentication=no',
     '-o', 'ConnectTimeout=8',
+    '-o', 'LogLevel=ERROR',
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',
     localFile,
@@ -635,7 +650,7 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
   ].join('; ');
   const out = await runSshCmd(config, cmd);
   if (!out.ok) {
-    return { ok: false, step: 'prepare-remote-mbp', error: (out.stderr || out.stdout || out.error || 'remote mbp prepare failed').trim(), workspace: ws, sourceMbp };
+    return { ok: false, step: 'prepare-remote-mbp', error: summarizeCmdError(out, 'remote mbp prepare failed'), workspace: ws, sourceMbp };
   }
   return { ok: true, workspace: ws, sourceMbp, detail: (out.stdout || '').trim() };
 }
