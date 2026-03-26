@@ -1,3 +1,5 @@
+const $ = (id) => document.getElementById(id);
+
 async function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
