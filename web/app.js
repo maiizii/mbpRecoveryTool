@@ -544,9 +544,9 @@ async function saveSshConnection() {
     body: JSON.stringify({ connectionId, privateKey }),
   });
 
-  $('sshPrivateKey').value = '';
   await loadConfig();
-  showResult('盒子与私钥已保存', { ok: true, connectionId, box: out, privateKey: keyOut });
+  fillSshForm(null);
+  showResult('盒子与私钥已保存，表单已重置为新增模式', { ok: true, connectionId, box: out, privateKey: keyOut });
 }
 
 function getRecoverPayload() {
