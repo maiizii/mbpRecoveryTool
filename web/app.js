@@ -279,20 +279,21 @@ function renderConnectionList(cfg = {}) {
   const userSelect = $('userConnectionSelect');
   const machineSummary = $('machineConnectionSummary');
 
+  const preferredRecoverConnectionId = cfg?.recover?.connectionId || activeId;
+
   if (machineSelect) {
     setSelectOptions(
       machineSelect,
       list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
-      activeId,
+      preferredRecoverConnectionId,
     );
   }
 
   if (userSelect) {
-    const preferredUserConnectionId = cfg?.recover?.connectionId || activeId;
     setSelectOptions(
       userSelect,
       list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` })),
-      preferredUserConnectionId,
+      preferredRecoverConnectionId,
     );
   }
 
@@ -802,6 +803,10 @@ $('machineConnectionSelect').onchange = async () => {
   }
 };
 $('userConnectionSelect').onchange = () => saveRecoverConfig({}, { silent: true });
+
+fillSshForm(null);
+loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
+lect').onchange = () => saveRecoverConfig({}, { silent: true });
 
 fillSshForm(null);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);
