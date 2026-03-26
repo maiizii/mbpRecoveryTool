@@ -1,5 +1,19 @@
 const $ = (id) => document.getElementById(id);
 
+async function j(url, options = {}) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { ok: res.ok, status: res.status, raw: text };
+  }
+  if (data && typeof data === 'object' && !('ok' in data)) data.ok = res.ok;
+  if (data && typeof data === 'object' && !('status' in data)) data.status = res.status;
+  return data;
+}
+
 async function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
