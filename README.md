@@ -11,9 +11,9 @@ MYT 小包恢复工具的首个正式完成版。
 
 ## 当前版本
 
-**正式版本：`v1.0.0`**
+**正式版本：`v1.0.2`**
 
-这是当前第一版完成版基线，代表：
+这是当前第一版正式稳定版基线，代表：
 
 - Web GUI 可用
 - detect-user 可用
@@ -24,6 +24,7 @@ MYT 小包恢复工具的首个正式完成版。
 
 详细说明见：
 
+- `RELEASE-NOTES-1.0.2.md`
 - `docs/RECOVERY-WEB-V1-FULL-FLOW-v1.0.0.md`
 - `RELEASE-NOTES-1.0.1.md`
 - `RELEASE-NOTES-1.0.0.md`

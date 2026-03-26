@@ -282,6 +282,23 @@ async function waitForContainerStatus({ boxBase, targetName, want = 'running', t
   return { ok: false, target: last, error: `timeout waiting for container status=${want}` };
 }
 
+async function waitForContainerStopped({ boxBase, targetName, timeoutMs = 60000, intervalMs = 2000 }) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    const discovered = await discoverInstances(boxBase);
+    if (discovered.ok) {
+      const target = discovered.list.find((x) => x.name === targetName) || null;
+      last = target;
+      if (target && String(target.status || '').trim() && String(target.status || '').trim() !== 'running') {
+        return { ok: true, target };
+      }
+    }
+    await sleep(intervalMs);
+  }
+  return { ok: false, target: last, error: 'timeout waiting for container stop confirmation' };
+}
+
 async function waitForInstanceProxyReady({ instanceApi, timeoutMs = 60000, intervalMs = 3000 }) {
   const started = Date.now();
   let last = null;
@@ -336,6 +353,14 @@ function runLocalCmd(bin, args, options = {}) {
 
 function shellQuote(s = '') {
   return `'${String(s).replace(/'/g, `"'"'`)}'`;
+}
+
+function stripBenignSshNoise(text = '') {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((line) => !/Permanently added .* to the list of known hosts\.?/i.test(line.trim()))
+    .join('\n')
+    .trim();
 }
 
 function resolveProxyMappingPath(config = {}) {
@@ -423,7 +448,7 @@ function pickSshRuntime(config = {}) {
 async function runSshCmd(config = {}, command = '') {
   const ssh = pickSshRuntime(config);
   if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
-  return runLocalCmd('ssh', [
+  const out = await runLocalCmd('ssh', [
     '-i', ssh.key,
     '-p', String(ssh.port),
     '-o', 'BatchMode=yes',
@@ -436,6 +461,7 @@ async function runSshCmd(config = {}, command = '') {
     `${ssh.user}@${ssh.host}`,
     command,
   ]);
+  return { ...out, stderr: stripBenignSshNoise(out.stderr) };
 }
 
 async function resolveUserdataImagePath(config = {}, targetName = '', log) {
@@ -532,7 +558,13 @@ function resolveBoxRecoverWorkspace(config = {}, userId = '') {
 async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', log }) {
   const ws = resolveBoxRecoverWorkspace(config, userId);
   const rawMbp = String(mbp || '').trim();
-  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/')) ? ws.sourceMbp : rawMbp;
+  const boxWorkRoot = resolveBoxWorkRoot(config);
+  const sourceMbp = (!rawMbp
+    || rawMbp.startsWith('/root/')
+    || rawMbp.startsWith('/tmp/')
+    || rawMbp.includes('/workspace/')
+    || rawMbp.startsWith(`${boxWorkRoot}/`)
+  ) ? ws.sourceMbp : rawMbp;
   if (log) log(`DEBUG[prepareRemoteMbpArtifacts]: rawMbp=${rawMbp || '-'} -> sourceMbp=${sourceMbp}`);
   const cmd = [
     'set -eu',
@@ -542,7 +574,7 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
     `EXTRACT_ROOT=${shellQuote(ws.extractRoot)}`,
     'if [ ! -f "$SRC" ]; then echo MBP_MISSING=$SRC; exit 21; fi',
     'mkdir -p "$TASK_DIR"',
-    'cp -f "$SRC" "$REMOTE_MBP"',
+    'if [ "$SRC" != "$REMOTE_MBP" ]; then cp -f "$SRC" "$REMOTE_MBP"; else echo REMOTE_MBP_REUSE=1; fi',
     'rm -rf "$EXTRACT_ROOT"',
     'mkdir -p "$EXTRACT_ROOT"',
     'tar -xzf "$REMOTE_MBP" -C "$EXTRACT_ROOT"',
@@ -552,7 +584,10 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
   ].join('; ');
   const out = await runSshCmd(config, cmd);
   if (!out.ok) {
-    return { ok: false, step: 'prepare-remote-mbp', error: (out.stderr || out.stdout || out.error || 'remote mbp prepare failed').trim(), workspace: ws, sourceMbp };
+    const detail = [`exit=${out.code ?? ''}`, (out.stdout || '').trim(), (out.stderr || '').trim(), (out.error || '').trim()]
+      .filter(Boolean)
+      .join(' | ');
+    return { ok: false, step: 'prepare-remote-mbp', error: detail || 'remote mbp prepare failed', workspace: ws, sourceMbp };
   }
   return { ok: true, workspace: ws, sourceMbp, detail: (out.stdout || '').trim() };
 }
@@ -1385,18 +1420,29 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
     await setStage(plan[1], async () => {
       log('子任务 2.1：确认目标容器状态');
       log(`子任务 2.2：准备停机 -> ${targetName}`);
-      if (pre.target?.status === 'running') {
-        log(`目标容器当前为 running，执行停机：${targetName}`);
-        const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
-        if (!stopResult.ok) throw new Error(stopResult.error || '停止目标实例失败');
-        log('子任务 2.3：停机完成，目标容器已进入可覆盖阶段');
-      } else {
-        log(`子任务 2.3：目标容器当前不是 running（${pre.target?.status || 'unknown'}），跳过停机`);
+
+      const initialStatus = pre.target?.status || 'unknown';
+      log(`子任务 2.2：预检状态=${initialStatus}`);
+      log(`子任务 2.2：执行停机请求（无论 running/unknown，覆盖前都必须先停稳） -> ${targetName}`);
+      const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
+      if (!stopResult.ok) {
+        throw new Error(`停止目标实例失败: ${stopResult.error || stopResult.status || 'stop api failed'}`);
       }
+
+      const stopped = await waitForContainerStopped({ boxBase, targetName, timeoutMs: 90000, intervalMs: 3000 });
+      if (!stopped.ok) {
+        throw new Error(`停机确认失败: ${stopped.error || '-'} lastStatus=${stopped.target?.status || 'unknown'}`);
+      }
+      log(`子任务 2.3：停机确认完成，当前状态=${stopped.target?.status || 'unknown'}`);
+
+      if ((stopped.target?.status || '') === 'running') {
+        throw new Error('停机保护触发：目标容器仍为 running，禁止覆盖 baseline');
+      }
+
       log('子任务 2.4：确认基座文件与目标镜像进入覆盖准备状态');
       const copyOut = await replaceBaselineOverSsh({ config, targetName, baseline, log });
       if (!copyOut.ok) {
-        throw new Error(`baseline 覆盖失败: ${(copyOut.stderr || copyOut.stdout || copyOut.error || copyOut.detail || 'ssh copy failed').trim()}`);
+        throw new Error(`baseline 覆盖失败: code=${copyOut.code ?? '-'} stdout=${(copyOut.stdout || '').trim() || '-'} stderr=${(copyOut.stderr || '').trim() || '-'} detail=${(copyOut.error || copyOut.detail || '').trim() || '-'}`);
       }
       const copyLog = `${copyOut.stdout || ''}`.trim();
       if (copyLog) log(`子任务 2.5：baseline 覆盖结果 -> ${copyLog.replace(/\s+/g, ' ').slice(0, 400)}`);
