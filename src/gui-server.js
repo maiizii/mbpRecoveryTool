@@ -1664,6 +1664,33 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'POST' && u.pathname === '/api/uploads/proxy-mapping') {
+    try {
+      const body = await parseJsonBody(req);
+      const rawName = String(body.filename || 'proxy-mapping').trim() || 'proxy-mapping';
+      const ext = path.extname(rawName).toLowerCase();
+      if (!['.csv', '.json', '.xlsx'].includes(ext)) {
+        return send(res, 400, { ok: false, error: '仅支持上传 .csv / .json / .xlsx 文件' });
+      }
+      const safeBase = path.basename(rawName, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'proxy-mapping';
+      const targetDir = path.join(UPLOADS_DIR, 'proxy-mappings');
+      ensureStoreDir(targetDir);
+      const targetName = `${safeBase}-${Date.now()}${ext}`;
+      const targetPath = path.join(targetDir, targetName);
+      const contentBase64 = String(body.contentBase64 || '').trim();
+      if (!contentBase64) return send(res, 400, { ok: false, error: '缺少上传内容' });
+      fs.writeFileSync(targetPath, Buffer.from(contentBase64, 'base64'));
+      return send(res, 200, {
+        ok: true,
+        filename: targetName,
+        filePath: `/app/data/uploads/proxy-mappings/${targetName}`,
+        bytes: fs.statSync(targetPath).size,
+      });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
   if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection') {
     try {
       const body = await parseJsonBody(req);

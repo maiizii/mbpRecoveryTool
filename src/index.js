@@ -341,49 +341,111 @@ function shellQuote(s = '') {
 }
 
 function resolveProxyMappingPath(config = {}) {
-  return String(config?.recover?.proxyMappingFile || path.join(process.cwd(), 'data', 'proxy-mapping.xlsx'));
+  return String(config?.recover?.proxyMappingFile || path.join(process.cwd(), 'data', 'proxy-mapping.json'));
+}
+
+function parseSimpleCsvLine(line = '') {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        cur += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map((x) => String(x || '').trim());
+}
+
+function normalizeProxyRow(row = {}, mappingFile = '') {
+  const result = {
+    id: row.ID ?? row.id ?? null,
+    type: String(row.类型 ?? row.type ?? row.proxyType ?? 2),
+    ip: String(row.IP ?? row.ip ?? row.proxyIp ?? '').trim(),
+    port: String(row.端口 ?? row.port ?? row.proxyPort ?? '').trim(),
+    user: String(row.用户名 ?? row.user ?? row.username ?? '').trim(),
+    password: String(row.密码 ?? row.password ?? row.pass ?? '').trim(),
+    status: row.状态 ?? row.status,
+    remark: row.备注 ?? row.remark ?? '',
+    raw: row,
+    mappingFile,
+  };
+  return result;
 }
 
 async function lookupProxyMappingByIp({ config = {}, ip = '' }) {
   const mappingFile = resolveProxyMappingPath(config);
   if (!ip) return { ok: false, error: 'missing proxy ip', mappingFile };
   if (!fs.existsSync(mappingFile)) return { ok: false, error: `proxy mapping file not found: ${mappingFile}`, mappingFile };
-  const py = [
-    'import json, sys',
-    'from openpyxl import load_workbook',
-    'file_path = sys.argv[1]',
-    'target_ip = str(sys.argv[2]).strip()',
-    'wb = load_workbook(file_path, read_only=True, data_only=True)',
-    'ws = wb[wb.sheetnames[0]]',
-    'headers = [str(v).strip() if v is not None else "" for v in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]',
-    'rows = []',
-    'for row in ws.iter_rows(min_row=2, values_only=True):',
-    '    item = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}',
-    '    if str(item.get("IP", "")).strip() == target_ip:',
-    '        rows.append(item)',
-    'payload = rows[0] if rows else None',
-    'print(json.dumps(payload, ensure_ascii=False, default=str))',
-  ].join('\n');
-  const out = await runLocalCmd('python3', ['-c', py, mappingFile, String(ip)]);
-  if (!out.ok) return { ok: false, error: (out.stderr || out.stdout || 'proxy lookup failed').trim(), mappingFile };
-  const raw = String(out.stdout || '').trim();
+
+  const ext = path.extname(mappingFile).toLowerCase();
   let row = null;
-  try { row = raw ? JSON.parse(raw) : null; } catch (err) {
-    return { ok: false, error: `proxy lookup parse failed: ${err.message}`, mappingFile, raw };
+
+  if (ext === '.json') {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+      const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.rows) ? parsed.rows : Array.isArray(parsed?.data) ? parsed.data : [];
+      row = list.find((item) => String(item?.IP ?? item?.ip ?? item?.proxyIp ?? '').trim() === String(ip).trim()) || null;
+    } catch (err) {
+      return { ok: false, error: `proxy json parse failed: ${err.message}`, mappingFile };
+    }
+  } else if (ext === '.csv') {
+    try {
+      const raw = fs.readFileSync(mappingFile, 'utf8').replace(/^\uFEFF/, '');
+      const lines = raw.split(/\r?\n/).filter((x) => x.trim());
+      if (!lines.length) return { ok: false, error: 'proxy csv file is empty', mappingFile };
+      const headers = parseSimpleCsvLine(lines[0]);
+      const items = lines.slice(1).map((line) => {
+        const cols = parseSimpleCsvLine(line);
+        const item = {};
+        headers.forEach((key, idx) => { item[key] = cols[idx] ?? ''; });
+        return item;
+      });
+      row = items.find((item) => String(item?.IP ?? item?.ip ?? item?.proxyIp ?? '').trim() === String(ip).trim()) || null;
+    } catch (err) {
+      return { ok: false, error: `proxy csv parse failed: ${err.message}`, mappingFile };
+    }
+  } else if (ext === '.xlsx') {
+    const py = [
+      'import json, sys',
+      'from openpyxl import load_workbook',
+      'file_path = sys.argv[1]',
+      'target_ip = str(sys.argv[2]).strip()',
+      'wb = load_workbook(file_path, read_only=True, data_only=True)',
+      'ws = wb[wb.sheetnames[0]]',
+      'headers = [str(v).strip() if v is not None else "" for v in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]',
+      'rows = []',
+      'for row in ws.iter_rows(min_row=2, values_only=True):',
+      '    item = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}',
+      '    if str(item.get("IP", "")).strip() == target_ip:',
+      '        rows.append(item)',
+      'payload = rows[0] if rows else None',
+      'print(json.dumps(payload, ensure_ascii=False, default=str))',
+    ].join('\n');
+    const out = await runLocalCmd('python3', ['-c', py, mappingFile, String(ip)]);
+    if (!out.ok) return { ok: false, error: (out.stderr || out.stdout || 'proxy lookup failed').trim(), mappingFile };
+    const raw = String(out.stdout || '').trim();
+    try { row = raw ? JSON.parse(raw) : null; } catch (err) {
+      return { ok: false, error: `proxy lookup parse failed: ${err.message}`, mappingFile, raw };
+    }
+  } else {
+    return { ok: false, error: `unsupported proxy mapping format: ${ext || '(none)'}`, mappingFile };
   }
+
   if (!row) return { ok: false, error: `proxy mapping not found for ip=${ip}`, mappingFile, proxyIp: ip };
-  const result = {
-    id: row.ID || null,
-    type: String(row.类型 ?? row.type ?? 2),
-    ip: String(row.IP ?? '').trim(),
-    port: String(row.端口 ?? '').trim(),
-    user: String(row.用户名 ?? '').trim(),
-    password: String(row.密码 ?? '').trim(),
-    status: row.状态,
-    remark: row.备注 || '',
-    raw: row,
-    mappingFile,
-  };
+  const result = normalizeProxyRow(row, mappingFile);
   if (!result.ip || !result.port) return { ok: false, error: `proxy mapping row incomplete for ip=${ip}`, mappingFile, row: result };
   return { ok: true, proxy: result };
 }

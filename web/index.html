@@ -224,10 +224,17 @@
             </div>
             <div>
               <label>代理映射文件</label>
-              <input id="proxyMappingFile" placeholder="例如 /app/data/proxy-mappings/map.json" />
+              <input id="proxyMappingFile" placeholder="例如 /app/data/uploads/proxy-mapping.csv" />
+              <div class="muted topgap">支持 .csv / .json（推荐）；.xlsx 需要容器内有 openpyxl。</div>
+            </div>
+            <div>
+              <label>上传代理映射文件</label>
+              <input id="proxyMappingUpload" type="file" accept=".csv,.json,.xlsx" />
+              <div class="muted topgap">选择文件后自动上传并写入上面的路径（存到 /app/data/uploads）。</div>
             </div>
             <div class="full actions">
               <button id="saveOtherSettings">保存其他设置</button>
+              <button id="uploadProxyMapping" class="secondary">上传并应用</button>
             </div>
           </div>
           <details class="topgap">

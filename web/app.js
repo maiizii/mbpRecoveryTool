@@ -1,5 +1,37 @@
-async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
-const $ = (id) => document.getElementById(id);
+async function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || '');
+      const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+      resolve(base64 || '');
+    };
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadProxyMappingFile() {
+  const input = $('proxyMappingUpload');
+  const file = input?.files?.[0];
+  if (!file) {
+    showResult('上传代理映射文件', { error: '请先选择 csv/json/xlsx 文件' });
+    return;
+  }
+  const base64 = await readFileAsBase64(file);
+  const out = await j('/api/uploads/proxy-mapping', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, contentBase64: base64 }),
+  });
+  if (!out?.ok) {
+    showResult('上传代理映射文件失败', out);
+    return;
+  }
+  $('proxyMappingFile').value = out.filePath || '';
+  await saveOtherSettings();
+  showResult('代理映射文件已上传并应用', out);
+}
 
 let slotRows = [];
 let currentRecoverJobId = '';
@@ -771,6 +803,11 @@ $('saveSshConnection').onclick = saveSshConnection;
 $('clearSshForm').onclick = clearSshForm;
 $('saveBaselines').onclick = saveBaselines;
 $('saveOtherSettings').onclick = saveOtherSettings;
+$('uploadProxyMapping').onclick = uploadProxyMappingFile;
+$('proxyMappingUpload').onchange = () => {
+  const file = $('proxyMappingUpload')?.files?.[0];
+  if (file) showResult('已选择代理映射文件', { ok: true, filename: file.name, size: file.size });
+};
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
 $('refreshSlotsMachine').onclick = refreshSlots;
