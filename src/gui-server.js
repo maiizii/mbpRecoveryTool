@@ -1617,7 +1617,27 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && u.pathname === '/api/config') {
     try {
       const body = await parseJsonBody(req);
-      const saved = saveAppConfig(body, CONFIG_PATH);
+      const current = getStoredConfig();
+      // 重要：/api/config 的前端调用通常基于公开配置（私钥已脱敏为 [stored]）。
+      // 这里必须保留服务端真实 ssh.connections，避免把真实私钥内容覆盖成 [stored]。
+      const merged = {
+        ...current,
+        ...(body || {}),
+        ssh: {
+          ...(current.ssh || {}),
+          ...((body || {}).ssh || {}),
+          connections: Array.isArray(current?.ssh?.connections) ? current.ssh.connections : [],
+        },
+        recover: {
+          ...(current.recover || {}),
+          ...((body || {}).recover || {}),
+        },
+        targets: {
+          ...(current.targets || {}),
+          ...((body || {}).targets || {}),
+        },
+      };
+      const saved = saveAppConfig(merged, CONFIG_PATH);
       return send(res, 200, { ok: true, config: getPublicConfig(), savedVersion: saved.version || 2 });
     } catch (err) {
       return send(res, 400, { ok: false, error: err.message });
@@ -1650,7 +1670,8 @@ const server = http.createServer(async (req, res) => {
       const current = getStoredConfig();
       const connectionId = String(body.id || '').trim() || generateConnectionId();
       const existing = getConnectionById(current, connectionId);
-      const privateKey = String(body.privateKey || '').trim();
+      const privateKeyRaw = String(body.privateKey || '').trim();
+      const privateKey = privateKeyRaw === '[stored]' ? '' : privateKeyRaw;
       let { config: next, connection } = upsertConnection(current, {
         ...(existing || {}),
         id: connectionId,
