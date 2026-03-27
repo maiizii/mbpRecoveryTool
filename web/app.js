@@ -539,9 +539,10 @@ function getSelectedRecoverFileLocation() {
 
 function toggleUserConnectionSelect() {
   const userConnectionSelectWrapper = $('userConnectionSelectWrapper');
-  if (userConnectionSelectWrapper) {
-    userConnectionSelectWrapper.style.display = '';
-  }
+  if (!userConnectionSelectWrapper) return;
+  const loc = getSelectedFileLocation();
+  // NAS 路径是挂载在盒子上的，但检索页不需要重复显式选择盒子：默认沿用当前配置/activeConnectionId。
+  userConnectionSelectWrapper.style.display = loc === 'box' ? '' : 'none';
 }
 
 async function loadConfig() {
