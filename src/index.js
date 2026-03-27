@@ -497,12 +497,15 @@ function proxyReadbackMatches(state = {}, expected = {}) {
   const data = state?.json?.data || {};
   const actualAddr = normalizeProxyAddr(data.addr || '');
   const expectedAddr = normalizeProxyAddr(`${expected.ip || ''}:${expected.port || ''}`);
-  const actualType = String(data.type ?? '').trim();
-  const expectedType = String(expected.type ?? '').trim();
   if (!actualAddr || !expectedAddr) return false;
-  if (actualAddr !== expectedAddr) return false;
-  if (expectedType && actualType && actualType !== expectedType) return false;
-  return true;
+  return actualAddr === expectedAddr;
+}
+
+function resolveDetectedProxyIpFromConfig(config = {}, userId = '') {
+  const key = String(userId || config?.recover?.userId || '').trim();
+  const users = Array.isArray(config?.recover?.detectedUsers) ? config.recover.detectedUsers : [];
+  const hit = users.find((x) => String(x?.userId || x?.uid || '').trim() === key) || null;
+  return String(hit?.proxyIp || config?.recover?.detected?.proxyIp || '').trim();
 }
 
 function pickSshRuntime(cfg = {}) {
@@ -1774,9 +1777,9 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
         }
       }
 
-      const detectedProxyIp = getNested(config, ['recover', 'detected', 'proxyIp'], null) || null;
+      const detectedProxyIp = resolveDetectedProxyIpFromConfig(config, config?.recover?.userId || '');
       if (!detectedProxyIp) {
-        throw new Error('S5 阶段失败：未从 detect/MBP 中解析出外网代理 IP');
+        throw new Error('S5 阶段失败：未从当前用户检测结果中解析出外网代理 IP');
       }
       const proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
       if (!proxyMap.ok) {
