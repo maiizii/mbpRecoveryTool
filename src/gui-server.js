@@ -1682,15 +1682,19 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && u.pathname === '/api/settings/general') {
     try {
       const body = await parseJsonBody(req);
+      const current = getStoredConfig();
+      const currentRecover = current?.recover || {};
       const patch = {
-        boxBase: String(body.boxBase || '').trim(),
-        sdkDir: String(body.sdkDir || '').trim(),
+        boxBase: Object.prototype.hasOwnProperty.call(body, 'boxBase') ? String(body.boxBase || '').trim() : String(current.boxBase || '').trim(),
+        sdkDir: Object.prototype.hasOwnProperty.call(body, 'sdkDir') ? String(body.sdkDir || '').trim() : String(current.sdkDir || '').trim(),
         recover: {
-          boxWorkRoot: String(body.boxWorkRoot || DEFAULT_BOX_WORK_ROOT).trim() || DEFAULT_BOX_WORK_ROOT,
-          baselineOptions: Array.isArray(body.baselineOptions) ? body.baselineOptions : [],
-          baseline: String(body.baseline || '').trim(),
-          proxyMappingFile: String(body.proxyMappingFile || '').trim(),
-          fallbackSocks5: String(body.fallbackSocks5 || '').trim(),
+          boxWorkRoot: Object.prototype.hasOwnProperty.call(body, 'boxWorkRoot')
+            ? (String(body.boxWorkRoot || DEFAULT_BOX_WORK_ROOT).trim() || DEFAULT_BOX_WORK_ROOT)
+            : String(currentRecover.boxWorkRoot || DEFAULT_BOX_WORK_ROOT).trim() || DEFAULT_BOX_WORK_ROOT,
+          baselineOptions: Array.isArray(body.baselineOptions) ? body.baselineOptions : (Array.isArray(currentRecover.baselineOptions) ? currentRecover.baselineOptions : []),
+          baseline: Object.prototype.hasOwnProperty.call(body, 'baseline') ? String(body.baseline || '').trim() : String(currentRecover.baseline || '').trim(),
+          proxyMappingFile: Object.prototype.hasOwnProperty.call(body, 'proxyMappingFile') ? String(body.proxyMappingFile || '').trim() : String(currentRecover.proxyMappingFile || '').trim(),
+          fallbackSocks5: Object.prototype.hasOwnProperty.call(body, 'fallbackSocks5') ? String(body.fallbackSocks5 || '').trim() : String(currentRecover.fallbackSocks5 || '').trim(),
         },
       };
       mergeAndSaveConfig(patch);

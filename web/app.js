@@ -618,7 +618,9 @@ async function saveBaselines() {
     sdkDir: $('sdkDir').value.trim(),
     boxWorkRoot: '',
     proxyMappingFile: $('proxyMappingFile').value.trim(),
+    fallbackSocks5: $('fallbackSocks5').value.trim(),
     baselineOptions: rows,
+    baseline: $('recoverBaseline')?.value?.trim?.() || '',
   };
   const out = await j('/api/settings/general', {
     method: 'POST',
