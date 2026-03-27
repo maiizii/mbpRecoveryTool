@@ -487,7 +487,10 @@ async function callInstanceProxyCmdViaBox({ config = {}, instanceApi = '', query
 }
 
 function normalizeProxyAddr(value = '') {
-  return String(value || '').replace(/^socks5:\/\//i, '').trim();
+  const raw = String(value || '').replace(/^socks5:\/\//i, '').trim();
+  if (!raw) return '';
+  const at = raw.lastIndexOf('@');
+  return (at >= 0 ? raw.slice(at + 1) : raw).trim();
 }
 
 function proxyReadbackMatches(state = {}, expected = {}) {
