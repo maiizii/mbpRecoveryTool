@@ -498,12 +498,13 @@ function resolveBoxWorkRoot(config = {}) {
   return config?.recover?.boxWorkRoot || '/mmc/myt_recover_work';
 }
 
-function resolveBoxRecoverWorkspace(config = {}, userId = '') {
+function resolveBoxRecoverWorkspace(config = {}, userId = '', mbpRoot = '/mmc/mbp') {
   const root = resolveBoxWorkRoot(config);
+  const sourceRoot = String(mbpRoot || '/mmc/mbp').trim() || '/mmc/mbp';
   return {
     root,
     taskDir: path.posix.join(root, String(userId || 'unknown')),
-    sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+    sourceMbp: path.posix.join(sourceRoot, `${userId}.mbp`),
     remoteMbp: path.posix.join(root, String(userId || 'unknown'), `${userId}.mbp`),
     extractRoot: path.posix.join(root, String(userId || 'unknown'), 'extract'),
     appRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'data', 'data', 'com.zhiliaoapp.musically'),
@@ -511,8 +512,8 @@ function resolveBoxRecoverWorkspace(config = {}, userId = '') {
   };
 }
 
-async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '' }) {
-  const ws = resolveBoxRecoverWorkspace(config, userId);
+async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', mbpRoot = '/mmc/mbp' }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId, mbpRoot);
   const sourceMbp = String(mbp || '').trim() || ws.sourceMbp;
   const cmd = [
     'set -eu',
@@ -1315,7 +1316,7 @@ async function prepareLocalDetectArtifacts(userId, cfg = {}, preferredSource = '
   ensureDir(taskDir);
   ensureDir(extractDir);
 
-  const ws = resolveBoxRecoverWorkspace(cfg, userId);
+  const ws = resolveBoxRecoverWorkspace(cfg, userId, cfg?.recover?.mbpRoot || '/mmc/mbp');
   const sourceMbp = String(preferredSource || '').trim() || ws.sourceMbp;
   const ssh = pickSshRuntime(cfg);
 
@@ -1477,10 +1478,19 @@ async function readDetectData(userId, cfg = {}, prepared = {}, preferredTargetNa
   };
 }
 
-async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '', connectionId = '') {
+async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '', connectionId = '', fileLocation = 'box') {
   const stages = [];
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
   const scopedCfg = withConnectionContext(cfg, connectionId);
-  const ensured = ensureConnectionReady(scopedCfg, connectionId);
+  const runtimeScopedCfg = {
+    ...scopedCfg,
+    recover: {
+      ...(scopedCfg.recover || {}),
+      mbpRoot,
+      fileLocation,
+    },
+  };
+  const ensured = ensureConnectionReady(runtimeScopedCfg, connectionId);
 
   stages.push({
     key: 'ensure_ssh_key',
@@ -1497,7 +1507,7 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
       message: `盒子私钥不可用：${ensured.error || 'unknown'}`,
       detected: {
         userId,
-        sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+        sourceMbp: path.posix.join(mbpRoot, `${userId}.mbp`),
         recoverMbp: '',
         extractRoot: '',
         taskDir: '',
@@ -1508,8 +1518,9 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
     };
   }
 
-  const runtimeCfg = ensured.config || scopedCfg;
+  const runtimeCfg = ensured.config || runtimeScopedCfg;
   const prepared = await prepareLocalDetectArtifacts(userId, runtimeCfg, preferredSource, preferredTargetName, preferredSlot);
+
 
   stages.push({
     key: 'prepare_source_extract',
@@ -1527,11 +1538,11 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
       message: tcpUnreachable
         ? `盒子连接不可达：${prepared.error || 'unreachable'}`
         : prepared.sourceMissing
-          ? `${prepared.error || `找不到 MBP 文件：${prepared.sourceMbp || path.posix.join('/mmc/mbp', `${userId}.mbp`)}`}`
+          ? `${prepared.error || `找不到 MBP 文件：${prepared.sourceMbp || path.posix.join(mbpRoot, `${userId}.mbp`)}`}`
           : `MBP 处理失败：${prepared.error || 'prepare failed'}`,
       detected: {
         userId,
-        sourceMbp: prepared.sourceMbp || path.posix.join('/mmc/mbp', `${userId}.mbp`),
+        sourceMbp: prepared.sourceMbp || path.posix.join(mbpRoot, `${userId}.mbp`),
         recoverMbp: '',
         extractRoot: '',
         taskDir: '',
@@ -1873,7 +1884,8 @@ const server = http.createServer(async (req, res) => {
         if (!userId) return send(res, 400, { ok: false, error: 'missing userId' });
         const cfg = readJson(CONFIG_PATH, {});
         const connectionId = String(body.connectionId || '').trim();
-        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot, connectionId);
+        const fileLocation = String(body.fileLocation || cfg?.recover?.fileLocation || 'box').trim().toLowerCase() === 'nas' ? 'nas' : 'box';
+        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot, connectionId, fileLocation);
         return send(res, 200, { ok: true, parsed, detected: parsed.detected });
       } catch (err) {
         send(res, 400, { ok: false, error: err.message });

@@ -132,7 +132,14 @@
         <div class="panel">
           <h2>用户检索</h2>
           <div class="grid2">
-            <div>
+            <div class="full">
+              <label>文件位置</label>
+              <div class="row file-location-options">
+                <label><input type="radio" name="fileLocation" value="box" checked> 盒子</label>
+                <label><input type="radio" name="fileLocation" value="nas"> NAS</label>
+              </div>
+            </div>
+            <div id="userConnectionSelectWrapper">
               <label>选择盒子</label>
               <select id="userConnectionSelect"></select>
             </div>

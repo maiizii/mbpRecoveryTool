@@ -538,6 +538,19 @@ function renderSshSection(cfg = {}) {
   bindConnectionListActions();
 }
 
+function getSelectedFileLocation() {
+  const selected = document.querySelector('input[name="fileLocation"]:checked');
+  return selected ? selected.value : 'box';
+}
+
+function toggleUserConnectionSelect() {
+  const fileLocation = getSelectedFileLocation();
+  const userConnectionSelectWrapper = $('userConnectionSelectWrapper');
+  if (userConnectionSelectWrapper) {
+    userConnectionSelectWrapper.style.display = fileLocation === 'box' ? '' : 'none';
+  }
+}
+
 async function loadConfig() {
   const cfg = await j('/api/config');
   $('sdkDir').value = cfg.sdkDir || '';
@@ -548,6 +561,11 @@ async function loadConfig() {
   if ($('userConnectionSelect')) $('userConnectionSelect').value = preferredConnectionId;
   if ($('recoverConnectionSelect')) $('recoverConnectionSelect').value = preferredConnectionId;
   if ($('machineConnectionSelect')) $('machineConnectionSelect').value = preferredConnectionId;
+  if (cfg.recover?.fileLocation) {
+    const radio = document.querySelector(`input[name="fileLocation"][value="${cfg.recover.fileLocation}"]`);
+    if (radio) radio.checked = true;
+  }
+  toggleUserConnectionSelect();
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
@@ -671,9 +689,11 @@ function getSelectedBaselineMeta() {
 function getRecoverPayload() {
   const recoverConnectionId = getSelectedRecoverConnectionId();
   const baselineMeta = getSelectedBaselineMeta();
+  const fileLocation = getSelectedFileLocation();
   return {
     userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
     connectionId: recoverConnectionId,
+    fileLocation,
     baseline: baselineMeta.path || '',
     baselineIdentity: {
       uid: baselineMeta.uid || '',
@@ -716,9 +736,13 @@ async function refreshSlots() {
 }
 
 async function detectUser() {
+  const fileLocation = getSelectedFileLocation();
+  const connectionId = $('userConnectionSelect')?.value?.trim?.() || '';
+
   const payload = {
     userId: $('recoverUserId').value.trim(),
-    connectionId: $('userConnectionSelect')?.value?.trim?.() || '',
+    fileLocation,
+    connectionId,
   };
   if (!payload.userId) {
     showResult('用户检索', { error: '请先填写目标 UID' });
@@ -732,7 +756,8 @@ async function detectUser() {
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '检索中...';
-  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n盒子: ${$('userConnectionSelect')?.selectedOptions?.[0]?.textContent || payload.connectionId}\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
+  const sourceHint = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n盒子: ${$('userConnectionSelect')?.selectedOptions?.[0]?.textContent || payload.connectionId}\n文件位置: ${fileLocation === 'nas' ? 'NAS' : '盒子'} (${sourceHint})\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
   $('raw').textContent = '';
   $('summary').textContent = '用户检索\n\n请求已发出，正在执行中……';
 
@@ -926,8 +951,16 @@ $('recoverCopyLog').onclick = async () => {
 };
 $('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+
 $('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+document.querySelectorAll('input[name="fileLocation"]').forEach(radio => {
+  radio.onchange = () => {
+    toggleUserConnectionSelect();
+    saveRecoverConfig({}, { silent: true });
+  };
+});
+
 $('machineConnectionSelect').onchange = async () => {
   const connectionId = $('machineConnectionSelect')?.value || '';
   if (!connectionId) return;
