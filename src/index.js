@@ -1798,6 +1798,32 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       const beforeQuery = 'cmd=1';
       const beforeState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: beforeQuery });
       log(`S5 阶段：写入前代理状态 http=${beforeState.status || '-'}${beforeState.body ? ` body=${beforeState.body}` : ''}`);
+
+      let stopState = null;
+      const beforeStatus = Number(beforeState?.json?.data?.status ?? -1);
+      if (beforeState.ok && beforeStatus === 1) {
+        log('S5 阶段：检测到旧代理已启动，先执行停止 -> cmd=3');
+        stopState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=3' });
+        if (!stopState.ok) {
+          throw new Error(`S5 阶段失败：停止旧代理调用失败 (http=${stopState.status || '-'} body=${stopState.body || stopState.stderr || '-'})`);
+        }
+        const stopStarted = Date.now();
+        const stopTimeoutMs = 8000;
+        let stopOk = false;
+        while (Date.now() - stopStarted <= stopTimeoutMs) {
+          const current = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
+          if (current.ok && Number(current?.json?.data?.status ?? -1) === 0) {
+            stopOk = true;
+            log(`S5 阶段：旧代理已停止 http=${current.status || '-'}${current.body ? ` body=${current.body}` : ''}`);
+            break;
+          }
+          await sleep(1000);
+        }
+        if (!stopOk) {
+          throw new Error('S5 阶段失败：停止旧代理后状态未进入未启动');
+        }
+      }
+
       const writeQuery = `cmd=2&type=${encodeURIComponent(String(s5.type || '2'))}&ip=${encodeURIComponent(String(s5.ip || ''))}&port=${encodeURIComponent(String(s5.port || ''))}&usr=${encodeURIComponent(String(s5.user || ''))}&pwd=${encodeURIComponent(String(s5.password || ''))}`;
       log(`S5 阶段：开始写入代理 -> ${s5.ip}:${s5.port} user=${s5.user || '-'} type=${s5.type}`);
       const writeState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: writeQuery });
@@ -1808,20 +1834,24 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       await sleep(1000);
       let afterState = null;
       const retryStarted = Date.now();
-      const retryTimeoutMs = 5000;
+      const retryTimeoutMs = 12000;
       let retryCount = 0;
+      let stableHits = 0;
       while (Date.now() - retryStarted <= retryTimeoutMs) {
         retryCount += 1;
         const current = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
         afterState = current;
         if (current.ok && proxyReadbackMatches(current, appliedExpected)) {
-          if (retryCount > 1) log(`S5 阶段：写入后回读在第 ${retryCount} 次恢复并匹配`);
-          break;
-        }
-        if (!current.ok) {
-          log(`S5 阶段：写入后回读第 ${retryCount} 次未恢复 (http=${current.status || '-'} body=${current.body || current.stderr || '-'})`);
+          stableHits += 1;
+          log(`S5 阶段：写入后回读第 ${retryCount} 次匹配，稳定计数=${stableHits} (http=${current.status || '-'} body=${current.body || '-'})`);
+          if (stableHits >= 3) break;
         } else {
-          log(`S5 阶段：写入后回读第 ${retryCount} 次未匹配，继续等待 (http=${current.status || '-'} body=${current.body || '-'})`);
+          stableHits = 0;
+          if (!current.ok) {
+            log(`S5 阶段：写入后回读第 ${retryCount} 次未恢复 (http=${current.status || '-'} body=${current.body || current.stderr || '-'})`);
+          } else {
+            log(`S5 阶段：写入后回读第 ${retryCount} 次未匹配，继续等待 (http=${current.status || '-'} body=${current.body || '-'})`);
+          }
         }
         if (Date.now() - retryStarted > retryTimeoutMs) break;
         await sleep(1000);
@@ -1829,12 +1859,12 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       if (!afterState?.ok) {
         throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState?.status || '-'} body=${afterState?.body || afterState?.stderr || '-'})`);
       }
-      if (!proxyReadbackMatches(afterState, appliedExpected)) {
-        throw new Error(`S5 阶段失败：代理写入后回读不匹配 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
+      if (!proxyReadbackMatches(afterState, appliedExpected) || stableHits < 3) {
+        throw new Error(`S5 阶段失败：代理写入后未稳定生效 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
       }
-      log(`S5 阶段：写入后代理状态 http=${afterState.status || '-'}${afterState.body ? ` body=${afterState.body}` : ''}`);
+      log(`S5 阶段：写入后代理状态已稳定 http=${afterState.status || '-'}${afterState.body ? ` body=${afterState.body}` : ''}`);
       return {
-        detail: `S5 已按外网 IP=${detectedProxyIp} 从映射表反查并写入 ${s5.ip}:${s5.port}（type=${s5.type}）`,
+        detail: `S5 已按外网 IP=${detectedProxyIp} 从映射表反查并稳定写入 ${s5.ip}:${s5.port}（type=${s5.type}）`,
         check: {
           path: '/proxy?cmd=2',
           instanceApi: resolvedInstanceApi,
@@ -1842,8 +1872,9 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
           mappingFile: proxyMap.proxy.mappingFile,
           applied: { ip: s5.ip, port: s5.port, user: s5.user, type: s5.type },
           before: { httpStatus: beforeState.status, body: beforeState.body },
+          stop: stopState ? { httpStatus: stopState.status, body: stopState.body } : null,
           write: { httpStatus: writeState.status, body: writeState.body },
-          after: { httpStatus: afterState.status, body: afterState.body },
+          after: { httpStatus: afterState.status, body: afterState.body, stableHits },
         },
       };
     });
