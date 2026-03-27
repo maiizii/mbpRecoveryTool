@@ -486,6 +486,22 @@ async function callInstanceProxyCmdViaBox({ config = {}, instanceApi = '', query
   return { ok: out.ok && status.startsWith('2'), status: Number(status || 0), body: bodyText, json, stdout, stderr: out.stderr || '', url: target };
 }
 
+function normalizeProxyAddr(value = '') {
+  return String(value || '').replace(/^socks5:\/\//i, '').trim();
+}
+
+function proxyReadbackMatches(state = {}, expected = {}) {
+  const data = state?.json?.data || {};
+  const actualAddr = normalizeProxyAddr(data.addr || '');
+  const expectedAddr = normalizeProxyAddr(`${expected.ip || ''}:${expected.port || ''}`);
+  const actualType = String(data.type ?? '').trim();
+  const expectedType = String(expected.type ?? '').trim();
+  if (!actualAddr || !expectedAddr) return false;
+  if (actualAddr !== expectedAddr) return false;
+  if (expectedType && actualType && actualType !== expectedType) return false;
+  return true;
+}
+
 function pickSshRuntime(cfg = {}) {
   const active = getActiveConnection(cfg || {});
   const ssh = cfg?.ssh || {};
@@ -1782,9 +1798,33 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       if (!writeState.ok) {
         throw new Error(`S5 阶段失败：代理写入调用失败 (http=${writeState.status || '-'} body=${writeState.body || writeState.stderr || '-'})`);
       }
-      const afterState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
-      if (!afterState.ok) {
-        throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
+      const appliedExpected = { ip: s5.ip, port: s5.port, type: s5.type, user: s5.user };
+      await sleep(1000);
+      let afterState = null;
+      const retryStarted = Date.now();
+      const retryTimeoutMs = 5000;
+      let retryCount = 0;
+      while (Date.now() - retryStarted <= retryTimeoutMs) {
+        retryCount += 1;
+        const current = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
+        afterState = current;
+        if (current.ok && proxyReadbackMatches(current, appliedExpected)) {
+          if (retryCount > 1) log(`S5 阶段：写入后回读在第 ${retryCount} 次恢复并匹配`);
+          break;
+        }
+        if (!current.ok) {
+          log(`S5 阶段：写入后回读第 ${retryCount} 次未恢复 (http=${current.status || '-'} body=${current.body || current.stderr || '-'})`);
+        } else {
+          log(`S5 阶段：写入后回读第 ${retryCount} 次未匹配，继续等待 (http=${current.status || '-'} body=${current.body || '-'})`);
+        }
+        if (Date.now() - retryStarted > retryTimeoutMs) break;
+        await sleep(1000);
+      }
+      if (!afterState?.ok) {
+        throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState?.status || '-'} body=${afterState?.body || afterState?.stderr || '-'})`);
+      }
+      if (!proxyReadbackMatches(afterState, appliedExpected)) {
+        throw new Error(`S5 阶段失败：代理写入后回读不匹配 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
       }
       log(`S5 阶段：写入后代理状态 http=${afterState.status || '-'}${afterState.body ? ` body=${afterState.body}` : ''}`);
       return {
