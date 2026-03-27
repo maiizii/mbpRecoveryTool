@@ -1902,15 +1902,21 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
 
       const proxyIpState = await resolveProxyIpFromPreparedMbp({ config, prepared: preparedWorkspace, userId, log });
       const detectedProxyIp = String(proxyIpState?.proxyIp || '').trim();
-      if (!detectedProxyIp) {
-        throw new Error('S5 阶段失败：未能从当前 MBP 中解析出外网IP');
+
+      let proxyMap = null;
+      if (detectedProxyIp) {
+        proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
+      } else {
+        proxyMap = { ok: false, error: 'proxy ip not found in prepared mbp' };
       }
-      let proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
+
       if (!proxyMap.ok) {
         const fallback = parseFallbackSocks5(config?.recover?.fallbackSocks5 || '');
         if (fallback.ok) {
           proxyMap = fallback;
-          log(`S5 阶段：代理映射未命中 ${detectedProxyIp}，回退通用 socks5 -> ${fallback.proxy.ip}:${fallback.proxy.port} user=${fallback.proxy.user || '-'}`);
+          log(`S5 阶段：${detectedProxyIp ? `代理映射未命中 ${detectedProxyIp}` : '当前 MBP 未解析出外网 IP'}，回退通用 socks5 -> ${fallback.proxy.ip}:${fallback.proxy.port} user=${fallback.proxy.user || '-'} type=${fallback.proxy.type}`);
+        } else if (!detectedProxyIp) {
+          throw new Error('S5 阶段失败：未能从当前 MBP 中解析出外网IP，且未配置通用 socks5 代理');
         } else {
           throw new Error(`S5 阶段失败：代理映射查找失败 (${proxyMap.error || 'unknown'})`);
         }
@@ -2117,4 +2123,5 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
 
