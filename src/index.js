@@ -1231,9 +1231,15 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
     const target = discovered.list.find((x) => x.name === targetName);
     if (target) {
       report.target = target;
+      const slots = groupSlots(discovered.list);
+      report.slotRow = slots.find((x) => x.slot === String(target.indexNum ?? '')) || null;
       report.overrides = resolveEndpointOverrides(config, targetName);
       report.checks.push({ item: 'targetExists', ok: true, note: `${target.name} (${target.status})` });
       report.checks.push({ item: 'targetState', ok: ['running', 'exited'].includes(target.status), note: `当前状态 ${target.status}` });
+      if (report.slotRow) {
+        const runningNames = report.slotRow.running.map((x) => x.name).join(', ') || '-';
+        report.checks.push({ item: 'slotState', ok: true, note: `slot=${report.slotRow.slot} running=${report.slotRow.running.length} [${runningNames}]` });
+      }
 
       const baseUrl = new URL(boxBase);
       let resolvedApi = report.overrides.instanceApi || null;
@@ -1262,6 +1268,7 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
   report.summary = summarizeChecks(report.checks);
   report.risks = [];
   if (report.target?.status === 'running') report.risks.push('目标实例当前为 running，后续真正恢复前必须先确认是否允许停机/覆盖');
+  if ((report.slotRow?.running?.length || 0) > 0) report.risks.push(`目标机位当前存在 running 容器 ${report.slotRow.running.map((x) => x.name).join(', ')}，执行恢复前必须先整机位清场`);
   if (!report.overrides?.instanceApi || !report.overrides?.rpaHost || !report.overrides?.rpaPort) report.risks.push('当前实例缺少完整外部端口覆盖配置，后续自动化连通性可能不稳定');
   if (!baseline || !resolvedMbp || !userId) report.risks.push('恢复核心参数未齐，不能进入执行阶段');
 
@@ -1539,16 +1546,53 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
     });
 
     await setStage(plan[1], async () => {
-      log('子任务 2.1：确认目标容器状态');
-      log(`子任务 2.2：准备停机 -> ${targetName}`);
-      if (pre.target?.status === 'running') {
-        log(`目标容器当前为 running，执行停机：${targetName}`);
-        const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
-        if (!stopResult.ok) throw new Error(stopResult.error || '停止目标实例失败');
-        log('子任务 2.3：停机完成，目标容器已进入可覆盖阶段');
-      } else {
-        log(`子任务 2.3：目标容器当前不是 running（${pre.target?.status || 'unknown'}），跳过停机`);
+      log('子任务 2.1：确认目标机位状态并执行整机位清场');
+      const discoveredNow = await discoverInstances(boxBase);
+      if (!discoveredNow.ok) {
+        throw new Error(`恢复前整机位清场失败：无法获取容器列表 (${discoveredNow?.result?.error || 'discover failed'})`);
       }
+      const slotsNow = groupSlots(discoveredNow.list || []);
+      let slotRow = null;
+      if (slot) slotRow = slotsNow.find((x) => x.slot === String(slot)) || null;
+      if (!slotRow) {
+        const targetNow = (discoveredNow.list || []).find((x) => x.name === targetName) || null;
+        if (targetNow) slotRow = slotsNow.find((x) => x.slot === String(targetNow.indexNum ?? '')) || null;
+      }
+      if (!slotRow) {
+        throw new Error(`恢复前整机位清场失败：未找到目标机位（slot=${slot || '-'} target=${targetName}）`);
+      }
+
+      const runningInSlot = Array.isArray(slotRow.running) ? slotRow.running.slice() : [];
+      if (!runningInSlot.length) {
+        log(`子任务 2.2：机位 ${slotRow.slot} 当前无 running 容器，直接进入 baseline 覆盖`);
+      } else {
+        log(`子任务 2.2：机位 ${slotRow.slot} 当前有 ${runningInSlot.length} 个 running 容器，先全部停机 -> ${runningInSlot.map((x) => x.name).join(', ')}`);
+        for (const item of runningInSlot) {
+          const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: item.name });
+          if (!stopResult.ok) throw new Error(`停止机位内运行容器失败：${item.name} (${stopResult.error || 'stop failed'})`);
+        }
+        const clearStarted = Date.now();
+        const clearTimeoutMs = 120000;
+        let cleared = false;
+        while (Date.now() - clearStarted <= clearTimeoutMs) {
+          const current = await discoverInstances(boxBase);
+          if (current.ok) {
+            const currentSlots = groupSlots(current.list || []);
+            const currentSlotRow = currentSlots.find((x) => x.slot === String(slotRow.slot)) || null;
+            const currentRunning = currentSlotRow?.running || [];
+            if (!currentRunning.length) {
+              cleared = true;
+              log(`子任务 2.3：机位 ${slotRow.slot} 已清场完成，running=0`);
+              break;
+            }
+          }
+          await sleep(3000);
+        }
+        if (!cleared) {
+          throw new Error(`恢复前整机位清场失败：机位 ${slotRow.slot} 仍有 running 容器`);
+        }
+      }
+
       log('子任务 2.4：确认基座文件与目标镜像进入覆盖准备状态');
       const copyOut = await replaceBaselineOverSsh({ config, targetName, baseline, log });
       if (!copyOut.ok) {
@@ -1556,7 +1600,7 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       }
       const copyLog = `${copyOut.stdout || ''}`.trim();
       if (copyLog) log(`子任务 2.5：baseline 覆盖结果 -> ${copyLog.replace(/\s+/g, ' ').slice(0, 400)}`);
-      return { detail: `baseline 已真实覆盖到 ${copyOut.userdata}` };
+      return { detail: `机位已清场，baseline 已真实覆盖到 ${copyOut.userdata}` };
     });
 
     await setStage(plan[2], async () => {
@@ -1723,7 +1767,7 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
           if (currentTarget.ip) {
             resolvedInstanceApi = resolveInstanceApiFromTarget(currentTarget, boxBase);
           }
-          log(`S5 阶段：实时探测容器状态=${targetStatus}${resolvedInstanceApi ? `，instanceApi=${resolvedInstanceApi}` : ''}`);
+          log(`S5 阶段：实时探测目标对象 name=${currentTarget.name} slot=${currentTarget.indexNum ?? '-'} status=${targetStatus} ip=${currentTarget.ip || '-'} api=${currentTarget.api || '-'}${resolvedInstanceApi ? `，instanceApi=${resolvedInstanceApi}` : ''}`);
         } else {
           log('S5 阶段：实时探测未找到目标容器，沿用前序状态');
         }
