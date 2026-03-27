@@ -11,186 +11,79 @@ MYT 小包恢复工具的首个正式完成版。
 
 ## 当前版本
 
-**正式版本：`v1.0.0`**
+**状态：正在进行通用部署改造**
 
-这是当前第一版完成版基线，代表：
+当前版本正在从一个本地化部署工具向更通用的、基于 Docker 的部署方式演进。
 
-- Web GUI 可用
-- detect-user 可用
-- recover-run 全流程可执行
-- baseline / 机参 / 清旧身份 / 用户层 / 精确复扫 / VPC / S5 / 启动验证 已接通
-- 机参层已改为批量覆盖，速度显著优化
-- 已具备任务状态、日志轮询、手动停止能力
+### 主要改造目标:
 
-详细说明见：
-
-- `docs/RECOVERY-WEB-V1-FULL-FLOW-v1.0.0.md`
-- `RELEASE-NOTES-1.0.1.md`
-- `RELEASE-NOTES-1.0.0.md`
+-   **便捷部署**: 通过 Docker 和 Docker Compose 实现“接近一键部署”到任何 Linux x86_64 服务器。
+-   **配置外化**: 将配置（包括敏感信息如 SSH 私钥）从代码中分离，通过环境变量和挂载卷管理。
+-   **Web UI 配置**: 新增 Web UI 界面，用于配置通用参数、SSH 连接和上传私钥。
+-   **明确的运行时目录**: 明确定义配置、数据、日志和私钥的持久化目录。
 
 ---
 
-## 目标
+## 部署 (Docker & Docker Compose)
 
-本项目要解决的是：
+本项目推荐使用 Docker 和 Docker Compose 进行部署。这将确保环境一致性，并简化依赖管理。
 
-- 用图形界面驱动既有恢复 SOP
-- 让操作者能完成 detect-user、预检、执行、观察、复盘
-- 把脚本化流程收敛成稳定的产品化工具
+### 1. 准备环境
 
-本项目**不做**：
+确保您的 Linux x86_64 服务器已安装 Docker 和 Docker Compose。
 
-- 重新发明 MYT 小包恢复流程
-- 在前端堆复杂业务判断
-- 为了“纯 API 化”而牺牲可用性
-
----
-
-## 当前架构
-
-三层结构：
-
-### 1. Web 前端
-
-负责：
-
-- 参数输入
-- 发起恢复
-- 查看 job 状态
-- 查看日志
-- 停止任务
-
-### 2. GUI Server / Orchestrator
-
-负责：
-
-- 暴露 API
-- 创建 `jobId`
-- 落状态文件 / 日志文件
-- 启动 `recover-run`
-- 编排阶段执行
-- 对前端提供统一状态查询
-
-### 3. MYT Box
-
-负责：
-
-- 保存 MBP / 容器 / userdata.img
-- 执行实际落盘动作
-- 提供容器 / VPC / 实例代理相关能力
-- 通过 SSH 接受编排层控制
-
-当前版本里，**SSH 仍然是关键依赖**。
-
----
-
-## 正式恢复顺序
-
-唯一正式顺序：
-
-```text
-baseline → 机参层 → 清旧身份 → 用户层注入 → 精确复扫 → VPC → S5 → 启动与验证
-```
-
-不建议随意改顺序。
-
----
-
-## 当前已经完成的关键能力
-
-### detect-user
-
-- 盒子侧准备 MBP 工作目录
-- 盒子侧解包
-- 提取关键文件
-- 读取基础用户信息和机参线索
-
-### recover-run
-
-- baseline 覆盖
-- 机参层批量注入
-- 旧身份清理
-- 用户层目录级注入
-- 精确复扫
-- VPC 配置
-- S5 写入与回读
-- 容器启动与收尾
-
-### GUI 与任务系统
-
-- `/api/recover/detect-user`
-- `/api/recover/precheck`
-- `/api/recover/plan`
-- `/api/recover/start`
-- `/api/recover/stop`
-- `/api/recover/dryrun`
-- `/api/recover/job`
-- `/api/recover/latest`
-- `/api/recover/log`
-
-每轮恢复都会生成：
-
-- `tmp/recover-jobs/<jobId>.json`
-- `tmp/recover-jobs/<jobId>.log`
-
----
-
-## 目录结构
-
-```text
-src/
-  index.js         recover 主编排
-  gui-server.js    Web 服务 / API / job 管理
-web/
-  index.html       前端页面
-  app.js           前端逻辑
-scripts/
-  smoke.sh         自检脚本
-docs/
-  ...              正式文档
-release/
-  ...              发布辅助目录
-tmp/
-  ...              本地临时工作目录（不提交）
-```
-
----
-
-## 配置
-
-先复制模板：
+### 2. 克隆仓库
 
 ```bash
-cp config.example.json config.json
+git clone https://github.com/yourorg/myt-recovery-tool.git
+cd myt-recovery-tool
+```
+<small>（请将 `yourorg/myt-recovery-tool` 替换为实际仓库地址）</small>
+
+### 3. 配置环境变量
+
+复制 `.env.example` 为 `.env` 文件，并根据需要修改。通常，核心路径（`CONFIG_PATH`, `DATA_DIR`, `JOBS_DIR`, `UPLOADS_DIR`, `SECRETS_DIR`）无需修改，它们会指向 Docker 容器内部的 `/app/data` 目录。
+
+```bash
+cp .env.example .env
+# nano .env # 编辑 .env 文件
 ```
 
-然后按环境填写。
+您可以通过 `.env` 文件设置一些默认值，例如 SSH 连接信息。但更推荐通过 Web UI 进行配置，配置项会持久化到 `./data/config.json`。
 
-### 关键配置项
+### 4. 启动服务
 
-- `boxBase`
-- `recover.boxWorkRoot`
-- `recover.slot`
-- `recover.targetName`
-- `recover.userId`
-- `recover.baseline`
-- `recover.baselineIdentity`
-- `recover.mbp`
-- `recover.proxyMappingFile`
-- `targets.<targetName>`
-- `ssh.enabled/host/port/user/key`
+使用 Docker Compose 启动服务：
 
-注意：
+```bash
+docker compose up -d
+```
 
-- `config.json` 不提交
-- 真实代理映射表不提交
-- 密钥 / token / 本地临时文件不提交
+服务将会在 `http://localhost:23321` (或您在 `.env` 中配置的 `PORT`) 启动。
+
+### 5. 访问 Web UI
+
+在浏览器中访问 `http://<您的服务器IP>:23321`。
+
+-   **通用设置**: 配置 `boxBase`, `sdkDir`, `boxWorkRoot`, `proxyMappingFile` 和 `baselineOptions`。
+-   **SSH 连接**: 添加和管理 SSH 连接配置 (Host, Port, User, Name)。
+-   **SSH 私钥**: 通过 Web UI 上传或粘贴私钥内容，私钥会被安全地存储在挂载卷中，权限 `0600`。
+
+所有配置将持久化到您主机上的 `./data` 目录中。
 
 ---
 
-## 启动
+## 开发与调试
 
-### 启动 GUI
+如果您需要进行本地开发或调试，可以直接运行 Node.js 服务。
+
+### 1. 安装依赖
+
+```bash
+npm install
+```
+
+### 2. 启动 GUI
 
 ```bash
 npm run gui
@@ -198,7 +91,7 @@ npm run gui
 
 默认从 `23321` 起监听，端口冲突自动顺延。
 
-### 常用命令
+### 3. 常用 CLI 命令
 
 ```bash
 npm run list
@@ -210,25 +103,57 @@ npm run recover-run
 
 ---
 
+## 目录结构
+
+```text
+.
+├── Dockerfile                  # Docker 构建文件
+├── docker-compose.yml          # Docker Compose 编排文件
+├── .env.example                # 环境变量配置示例
+├── data/                       # [挂载卷] 运行时数据，包括 config.json, jobs/, uploads/, secrets/
+├── src/
+│   ├── index.js                # recover 主编排 (CLI 入口)
+│   ├── gui-server.js           # Web 服务 / API / job 管理
+│   └── config-store.js         # 配置持久化与管理逻辑
+├── web/
+│   ├── index.html              # 前端页面
+│   └── app.js                  # 前端逻辑
+├── scripts/
+│   └── smoke.sh                # 自检脚本
+└── docs/
+    └── ...                     # 正式文档
+```
+
+---
+
+## 注意事项
+
+-   **安全性**: `data/secrets/ssh/` 目录存放 SSH 私钥，请确保其安全。私钥不会提交到 Git 仓库，也不会打包进 Docker 镜像。
+-   **配置优先级**: 环境变量 (如 `.env` 文件) > Web UI 持久化配置 (`./data/config.json`)。Web UI 配置是运行时主要管理方式。
+-   **`config.json`**: 不再直接在仓库根目录维护 `config.json`，而是由 Web UI 生成和管理 `./data/config.json`。
+-   `package.json` 中的 `scripts` 仍然用于本地开发与 CLI 调试。
+
+---
+
 ## 当前版本边界
 
 `v1.0.0` 的含义是：
 
-- 工具层恢复链路已经收口
-- 可以作为稳定基线打 tag、回滚、继续迭代
+-   工具层恢复链路已经收口
+-   可以作为稳定基线打 tag、回滚、继续迭代
 
 但它**不等于**：
 
-- TikTok 业务层表现已经完全无问题
-- 所有环境都必然零调整可用
-- 后续不再需要继续验证
+-   TikTok 业务层表现已经完全无问题
+-   所有环境都必然零调整可用
+-   后续不再需要继续验证
 
 业务层仍应继续验证：
 
-- 登录态
-- 页面行为
-- 连播稳定性
-- 重启后保持情况
+-   登录态
+-   页面行为
+-   连播稳定性
+-   重启后保持情况
 
 ---
 
@@ -236,18 +161,19 @@ npm run recover-run
 
 仓库中保留：
 
-- 代码
-- 配置模板
-- 正式文档
-- 可复现脚本
+-   代码
+-   配置模板 (`config.example.json`)
+-   正式文档
+-   可复现脚本
+-   Docker 部署相关文件
 
-本地保留：
+本地保留 (`./data` 目录)：
 
-- `config.json`
-- 代理映射表
-- SSH 密钥
-- 临时拆包目录
-- 运行日志
+-   `config.json` (由 Web UI 管理)
+-   代理映射表 (通过 Web UI 上传或管理)
+-   SSH 密钥 (通过 Web UI 管理)
+-   临时拆包目录
+-   运行日志
 
 ---
 
@@ -255,11 +181,11 @@ npm run recover-run
 
 正式发布时建议：
 
-1. 更新版本号
-2. 写清 release notes
-3. 保留完整流程文档
-4. 打 Git tag
-5. 推送 GitHub
+1.  更新版本号
+2.  写清 release notes
+3.  保留完整流程文档
+4.  打 Git tag
+5.  推送 GitHub
 
 当前推荐 tag：
 

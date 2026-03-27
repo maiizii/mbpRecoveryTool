@@ -1,22 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import https from 'node:https';
+import crypto from 'node:crypto';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_BOX_WORK_ROOT,
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_DATA_DIR,
+  DEFAULT_JOBS_DIR,
+  DEFAULT_UPLOADS_DIR,
+  applyActiveConnection,
+  ensureDir as ensureStoreDir,
+  generateConnectionId,
+  getActiveConnection,
+  getConnectionById,
+  listConnections,
+  loadAppConfig,
+  saveAppConfig,
+  upsertConnection,
+  deleteConnection,
+  writePrivateKey,
+  ensureConnectionPrivateKeyFile,
+} from './config-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const WEB_DIR = path.join(ROOT, 'web');
-const CONFIG_PATH = path.join(ROOT, 'config.json');
+const CONFIG_PATH = DEFAULT_CONFIG_PATH;
+const DATA_DIR = DEFAULT_DATA_DIR;
 const BASE_PORT = Number(process.env.PORT || 23321);
-const DEFAULT_BOX_WORK_ROOT = '/mmc/myt_recover_work';
-const DEFAULT_SSH_HOST = 'mylo.gote.top';
-const DEFAULT_SSH_PORT = 23191;
-const DEFAULT_SSH_USER = 'root';
-const DEFAULT_SSH_KEY = '/root/.ssh/MYT1_ed25519';
-const JOBS_DIR = path.join(ROOT, 'tmp', 'recover-jobs');
+const JOBS_DIR = DEFAULT_JOBS_DIR;
+const UPLOADS_DIR = DEFAULT_UPLOADS_DIR;
 
 function ensureJobsDir() {
   fs.mkdirSync(JOBS_DIR, { recursive: true });
@@ -213,13 +231,101 @@ function readJson(file, fallback = {}) {
 }
 
 function writeJson(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+}
+
+function getStoredConfig() {
+  return loadAppConfig(CONFIG_PATH);
+}
+
+function getRuntimeConfig() {
+  return applyActiveConnection(getStoredConfig());
+}
+
+function withConnectionContext(cfg = {}, connectionId = '') {
+  const next = { ...(cfg || {}), ssh: { ...((cfg || {}).ssh || {}) } };
+  const picked = String(connectionId || '').trim();
+  if (picked) next.ssh.activeConnectionId = picked;
+  return next;
+}
+
+function ensureConnectionReady(cfg = {}, connectionId = '') {
+  const scoped = withConnectionContext(cfg, connectionId);
+  const ensured = ensureConnectionPrivateKeyFile(scoped, connectionId);
+  if (!ensured.ok) return ensured;
+  saveAppConfig(ensured.config, CONFIG_PATH);
+  return ensured;
+}
+
+function getPublicConfig() {
+  const cfg = getStoredConfig();
+  const active = getActiveConnection(cfg);
+  return {
+    ...cfg,
+    ssh: {
+      ...cfg.ssh,
+      host: '',
+      port: cfg.ssh?.port || '',
+      user: '',
+      key: '',
+      connections: listConnections(cfg),
+      activeConnectionId: cfg.ssh?.activeConnectionId || '',
+      activeConnection: active ? {
+        id: active.id,
+        name: active.name,
+        sshHost: active.sshHost,
+        sshPort: active.sshPort,
+        sshUser: active.sshUser,
+        managementPort: active.managementPort,
+        boxBase: active.boxBase,
+        boxWorkRoot: active.boxWorkRoot,
+        privateKeyPath: active.privateKeyPath ? 'configured' : '',
+        privateKeyFingerprint: active.privateKeyFingerprint || '',
+        hasPrivateKey: Boolean(active.privateKeyPath),
+        updatedAt: active.updatedAt || '',
+      } : null,
+    },
+    runtime: {
+      configPath: CONFIG_PATH,
+      dataDir: DATA_DIR,
+      jobsDir: JOBS_DIR,
+      uploadsDir: UPLOADS_DIR,
+    },
+  };
+}
+
+function parseJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (d) => raw += d.toString());
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(raw || '{}'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function mergeAndSaveConfig(patch = {}) {
+  const current = getStoredConfig();
+  const next = {
+    ...current,
+    ...(patch || {}),
+    ssh: { ...(current.ssh || {}), ...((patch || {}).ssh || {}) },
+    recover: { ...(current.recover || {}), ...((patch || {}).recover || {}) },
+    targets: { ...(current.targets || {}), ...((patch || {}).targets || {}) },
+  };
+  return saveAppConfig(next, CONFIG_PATH);
 }
 
 function requestText(target, { method = 'GET', timeout = 5000 } = {}) {
   return new Promise((resolve) => {
     const u = new URL(target);
-    const lib = u.protocol === 'https:' ? require('node:https') : http;
+    const lib = u.protocol === 'https:' ? https : http;
     const req = lib.request(
       u,
       { method, timeout, headers: { accept: 'application/json,text/plain,*/*' } },
@@ -392,12 +498,13 @@ function resolveBoxWorkRoot(config = {}) {
   return config?.recover?.boxWorkRoot || '/mmc/myt_recover_work';
 }
 
-function resolveBoxRecoverWorkspace(config = {}, userId = '') {
+function resolveBoxRecoverWorkspace(config = {}, userId = '', mbpRoot = '/mmc/mbp') {
   const root = resolveBoxWorkRoot(config);
+  const sourceRoot = String(mbpRoot || '/mmc/mbp').trim() || '/mmc/mbp';
   return {
     root,
     taskDir: path.posix.join(root, String(userId || 'unknown')),
-    sourceMbp: path.posix.join('/mmc/mbp', `${userId}.mbp`),
+    sourceMbp: path.posix.join(sourceRoot, `${userId}.mbp`),
     remoteMbp: path.posix.join(root, String(userId || 'unknown'), `${userId}.mbp`),
     extractRoot: path.posix.join(root, String(userId || 'unknown'), 'extract'),
     appRoot: path.posix.join(root, String(userId || 'unknown'), 'extract', 'data', 'data', 'com.zhiliaoapp.musically'),
@@ -405,8 +512,8 @@ function resolveBoxRecoverWorkspace(config = {}, userId = '') {
   };
 }
 
-async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '' }) {
-  const ws = resolveBoxRecoverWorkspace(config, userId);
+async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', mbpRoot = '/mmc/mbp' }) {
+  const ws = resolveBoxRecoverWorkspace(config, userId, mbpRoot);
   const sourceMbp = String(mbp || '').trim() || ws.sourceMbp;
   const cmd = [
     'set -eu',
@@ -444,14 +551,16 @@ async function cleanupRemoteRecoverWorkspace({ config = {}, userId = '' }) {
 }
 
 function pickSshRuntime(cfg = {}) {
-  const ssh = cfg?.ssh || {};
-  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1';
+  const runtimeCfg = applyActiveConnection(cfg || {});
+  const ssh = runtimeCfg?.ssh || {};
+  const active = getActiveConnection(runtimeCfg || cfg || {});
+  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1' || Boolean(active?.privateKeyPath);
   return {
     enabled,
-    host: String(ssh.host || process.env.MYT_BOX_SSH_HOST || DEFAULT_SSH_HOST).trim(),
-    port: Number(ssh.port || process.env.MYT_BOX_SSH_PORT || DEFAULT_SSH_PORT),
-    user: String(ssh.user || process.env.MYT_BOX_SSH_USER || DEFAULT_SSH_USER).trim(),
-    key: String(ssh.key || process.env.MYT_BOX_SSH_KEY || DEFAULT_SSH_KEY).trim(),
+    host: String(ssh.host || active?.sshHost || process.env.MYT_BOX_SSH_HOST || '').trim(),
+    port: Number(ssh.port || active?.sshPort || process.env.MYT_BOX_SSH_PORT || 22),
+    user: String(ssh.user || active?.sshUser || process.env.MYT_BOX_SSH_USER || 'root').trim(),
+    key: String(ssh.key || active?.privateKeyPath || process.env.MYT_BOX_SSH_KEY || '').trim(),
   };
 }
 
@@ -1207,7 +1316,7 @@ async function prepareLocalDetectArtifacts(userId, cfg = {}, preferredSource = '
   ensureDir(taskDir);
   ensureDir(extractDir);
 
-  const ws = resolveBoxRecoverWorkspace(cfg, userId);
+  const ws = resolveBoxRecoverWorkspace(cfg, userId, cfg?.recover?.mbpRoot || '/mmc/mbp');
   const sourceMbp = String(preferredSource || '').trim() || ws.sourceMbp;
   const ssh = pickSshRuntime(cfg);
 
@@ -1290,9 +1399,128 @@ async function prepareLocalDetectArtifacts(userId, cfg = {}, preferredSource = '
   };
 }
 
-async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '') {
+async function readDetectData(userId, cfg = {}, prepared = {}, preferredTargetName = '', preferredSlot = '') {
+  const taskDir = prepared?.taskDir || path.join(ROOT, 'tmp', 'detect-user', userId);
+  const extractDir = prepared?.extractDir || path.join(taskDir, 'extract');
+  const workingMbp = prepared?.backupMbp || prepared?.localSourceMbp || prepared?.sourceMbp || '';
+
+  let cfgDir = '';
+  const queue = [extractDir];
+  const seen = new Set();
+  while (queue.length) {
+    const dir = queue.shift();
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const names = new Set(entries.filter((x) => x.isFile()).map((x) => x.name));
+    if (names.has('cfg.json') || names.has('location.json') || names.has('baseCfg.json')) {
+      cfgDir = dir;
+      break;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.' && entry.name !== '..') {
+        queue.push(path.join(dir, entry.name));
+      }
+    }
+  }
+
+  const cfgJson = readJson(cfgDir ? path.join(cfgDir, 'cfg.json') : '', {});
+  const baseCfg = readJson(cfgDir ? path.join(cfgDir, 'baseCfg.json') : '', {});
+  const location = readJson(cfgDir ? path.join(cfgDir, 'location.json') : '', {});
+  const deviceInfo = readJson(cfgDir ? path.join(cfgDir, 'device_info.json') : '', {});
+  const pif = readJson(cfgDir ? path.join(cfgDir, 'pif.json') : '', {});
+  const telephone = readJson(cfgDir ? path.join(cfgDir, 'telephone.json') : '', {});
+  const gsms = readJson(cfgDir ? path.join(cfgDir, 'gsms.json') : '', []);
+  const awemeUser = extractUserInfoFromAwemeUserXml(extractDir);
+  const accountSetting = extractUserInfoFromAccountSettingBlk(extractDir);
+
+  const detected = mapDetectedFromLocalData({
+    userId,
+    cfg,
+    sourceMbp: prepared?.sourceMbp || '',
+    taskDir,
+    workingMbp,
+    extractDir,
+    cfgDir,
+    cfgJson,
+    location,
+    baseCfg,
+    deviceInfo,
+    gsms,
+    pif,
+    telephone,
+    awemeUser,
+    accountSetting,
+  });
+
+  return {
+    detected,
+    diag: {
+      prepared,
+      cfgDir,
+      files: {
+        cfgJson: cfgDir ? path.join(cfgDir, 'cfg.json') : '',
+        baseCfg: cfgDir ? path.join(cfgDir, 'baseCfg.json') : '',
+        location: cfgDir ? path.join(cfgDir, 'location.json') : '',
+        deviceInfo: cfgDir ? path.join(cfgDir, 'device_info.json') : '',
+        pif: cfgDir ? path.join(cfgDir, 'pif.json') : '',
+        telephone: cfgDir ? path.join(cfgDir, 'telephone.json') : '',
+        gsms: cfgDir ? path.join(cfgDir, 'gsms.json') : '',
+        awemeUserXml: awemeUser?.awemeUserXml || '',
+        accountSettingBlk: accountSetting?.accountSettingBlk || '',
+      },
+    },
+  };
+}
+
+async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferredTargetName = '', preferredSlot = '', connectionId = '', fileLocation = 'box') {
   const stages = [];
-  const prepared = await prepareLocalDetectArtifacts(userId, cfg, preferredSource, preferredTargetName, preferredSlot);
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  const scopedCfg = withConnectionContext(cfg, connectionId);
+  const runtimeScopedCfg = {
+    ...scopedCfg,
+    recover: {
+      ...(scopedCfg.recover || {}),
+      mbpRoot,
+      fileLocation,
+    },
+  };
+  const ensured = ensureConnectionReady(runtimeScopedCfg, connectionId);
+
+  stages.push({
+    key: 'ensure_ssh_key',
+    label: '确认盒子私钥文件',
+    status: ensured.ok ? 'done' : 'failed',
+    detail: ensured.ok
+      ? (ensured.created ? `已重建私钥文件: ${ensured.keyPath}` : `直接复用私钥文件: ${ensured.keyPath}`)
+      : (ensured.error || '私钥检查失败'),
+  });
+
+  if (!ensured.ok) {
+    return {
+      status: 'prepare_failed',
+      message: `盒子私钥不可用：${ensured.error || 'unknown'}`,
+      detected: {
+        userId,
+        sourceMbp: path.posix.join(mbpRoot, `${userId}.mbp`),
+        recoverMbp: '',
+        extractRoot: '',
+        taskDir: '',
+        workingMbp: '',
+      },
+      stages,
+      diag: { ensureKey: ensured },
+    };
+  }
+
+  const runtimeCfg = ensured.config || runtimeScopedCfg;
+  const prepared = await prepareLocalDetectArtifacts(userId, runtimeCfg, preferredSource, preferredTargetName, preferredSlot);
+
 
   stages.push({
     key: 'prepare_source_extract',
@@ -1310,11 +1538,11 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
       message: tcpUnreachable
         ? `盒子连接不可达：${prepared.error || 'unreachable'}`
         : prepared.sourceMissing
-          ? `${prepared.error || `找不到 MBP 文件：${prepared.sourceMbp || path.posix.join('/mmc/mbp', `${userId}.mbp`)}`}`
+          ? `${prepared.error || `找不到 MBP 文件：${prepared.sourceMbp || path.posix.join(mbpRoot, `${userId}.mbp`)}`}`
           : `MBP 处理失败：${prepared.error || 'prepare failed'}`,
       detected: {
         userId,
-        sourceMbp: prepared.sourceMbp || path.posix.join('/mmc/mbp', `${userId}.mbp`),
+        sourceMbp: prepared.sourceMbp || path.posix.join(mbpRoot, `${userId}.mbp`),
         recoverMbp: '',
         extractRoot: '',
         taskDir: '',
@@ -1325,7 +1553,7 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
     };
   }
 
-  const readOut = await readDetectData(userId, cfg, prepared, preferredTargetName, preferredSlot);
+  const readOut = await readDetectData(userId, runtimeCfg, prepared, preferredTargetName, preferredSlot);
   const detected = readOut.detected;
   const hasDetails = Boolean(
     detected.username || detected.nickname || detected.name || detected.secUid || detected.proxyIp || detected.model || detected.brand || detected.androidId
@@ -1349,9 +1577,31 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
 function resolveRecoverMbp(cfg = {}, body = {}) {
   if (body.mbp) return body.mbp;
   const userId = String(body.userId || cfg?.recover?.userId || '').trim();
-  const users = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
-  const hit = users.find((x) => String(x?.userId || x?.uid || '') === userId) || null;
-  return hit?.workingMbp || hit?.sourceMbp || cfg?.recover?.detected?.workingMbp || cfg?.recover?.detected?.recoverMbp || cfg?.recover?.detected?.sourceMbp || '';
+  if (!userId) return '';
+  const fileLocation = String(body.fileLocation || cfg?.recover?.fileLocation || 'box').trim();
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  return path.posix.join(mbpRoot, `${userId}.mbp`);
+}
+
+function persistRecoverPayload(body = {}) {
+  const current = getStoredConfig();
+  const next = {
+    ...current,
+    recover: {
+      ...(current.recover || {}),
+      ...(body || {}),
+      baselineIdentity: {
+        ...(current?.recover?.baselineIdentity || {}),
+        ...((body || {}).baselineIdentity || {}),
+      },
+      detected: {
+        ...(current?.recover?.detected || {}),
+        ...((body || {}).detected || {}),
+      },
+    },
+  };
+  saveAppConfig(next, CONFIG_PATH);
+  return next;
 }
 
 function buildRecoverArgs(configPath, mode, body = {}) {
@@ -1362,11 +1612,15 @@ function buildRecoverArgs(configPath, mode, body = {}) {
   const baseline = body.baseline || cfg?.recover?.baseline || '';
   const mbp = resolveRecoverMbp(cfg, body);
   const userId = body.userId || cfg?.recover?.userId || '';
+  const fileLocation = body.fileLocation || cfg?.recover?.fileLocation || 'box';
+  const connectionId = body.connectionId || cfg?.recover?.connectionId || '';
   if (targetName) args.push(`--target-name=${targetName}`);
   if (slot != null && String(slot).trim() !== '') args.push(`--slot=${String(slot).trim()}`);
   if (baseline) args.push(`--baseline=${baseline}`);
   if (mbp) args.push(`--mbp=${mbp}`);
   if (userId) args.push(`--user-id=${userId}`);
+  if (fileLocation) args.push(`--file-location=${fileLocation}`);
+  if (connectionId) args.push(`--connection-id=${connectionId}`);
   return args;
 }
 
@@ -1377,34 +1631,226 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && u.pathname === '/app.js') return serveStatic(res, path.join(WEB_DIR, 'app.js'));
   if (req.method === 'GET' && u.pathname === '/style.css') return serveStatic(res, path.join(WEB_DIR, 'style.css'));
 
+  if (req.method === 'GET' && u.pathname === '/healthz') {
+    ensureStoreDir(DATA_DIR);
+    ensureJobsDir();
+    ensureStoreDir(UPLOADS_DIR);
+    return send(res, 200, {
+      ok: true,
+      status: 'ok',
+      configPath: CONFIG_PATH,
+      dataDir: DATA_DIR,
+      jobsDir: JOBS_DIR,
+      uploadsDir: UPLOADS_DIR,
+    });
+  }
+
   if (req.method === 'GET' && u.pathname === '/api/config') {
-    return send(res, 200, readJson(CONFIG_PATH, {
-      boxBase: '', sdkDir: '', targets: {}, recover: { boxWorkRoot: DEFAULT_BOX_WORK_ROOT },
-    }));
+    return send(res, 200, getPublicConfig());
   }
 
   if (req.method === 'POST' && u.pathname === '/api/config') {
-    let raw = '';
-    req.on('data', (d) => raw += d.toString());
-    req.on('end', () => {
-      try {
-        const body = JSON.parse(raw || '{}');
-        writeJson(CONFIG_PATH, body);
-        send(res, 200, { ok: true, config: body });
-      } catch (err) {
-        send(res, 400, { ok: false, error: err.message });
+    try {
+      const body = await parseJsonBody(req);
+      const current = getStoredConfig();
+      // 重要：/api/config 的前端调用通常基于公开配置（私钥已脱敏为 [stored]）。
+      // 这里必须保留服务端真实 ssh.connections，避免把真实私钥内容覆盖成 [stored]。
+      const merged = {
+        ...current,
+        ...(body || {}),
+        ssh: {
+          ...(current.ssh || {}),
+          ...((body || {}).ssh || {}),
+          connections: Array.isArray(current?.ssh?.connections) ? current.ssh.connections : [],
+        },
+        recover: {
+          ...(current.recover || {}),
+          ...((body || {}).recover || {}),
+        },
+        targets: {
+          ...(current.targets || {}),
+          ...((body || {}).targets || {}),
+        },
+      };
+      const saved = saveAppConfig(merged, CONFIG_PATH);
+      return send(res, 200, { ok: true, config: getPublicConfig(), savedVersion: saved.version || 2 });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/general') {
+    try {
+      const body = await parseJsonBody(req);
+      const patch = {
+        boxBase: String(body.boxBase || '').trim(),
+        sdkDir: String(body.sdkDir || '').trim(),
+        recover: {
+          boxWorkRoot: String(body.boxWorkRoot || DEFAULT_BOX_WORK_ROOT).trim() || DEFAULT_BOX_WORK_ROOT,
+          baselineOptions: Array.isArray(body.baselineOptions) ? body.baselineOptions : [],
+          baseline: String(body.baseline || '').trim(),
+          proxyMappingFile: String(body.proxyMappingFile || '').trim(),
+        },
+      };
+      mergeAndSaveConfig(patch);
+      return send(res, 200, { ok: true, config: getPublicConfig() });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/uploads/proxy-mapping') {
+    try {
+      const body = await parseJsonBody(req);
+      const rawName = String(body.filename || 'proxy-mapping').trim() || 'proxy-mapping';
+      const ext = path.extname(rawName).toLowerCase();
+      if (!['.csv', '.json', '.xlsx'].includes(ext)) {
+        return send(res, 400, { ok: false, error: '仅支持上传 .csv / .json / .xlsx 文件' });
       }
-    });
-    return;
+      const safeBase = path.basename(rawName, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'proxy-mapping';
+      const targetDir = path.join(UPLOADS_DIR, 'proxy-mappings');
+      ensureStoreDir(targetDir);
+      const targetName = `${safeBase}-${Date.now()}${ext}`;
+      const targetPath = path.join(targetDir, targetName);
+      const contentBase64 = String(body.contentBase64 || '').trim();
+      if (!contentBase64) return send(res, 400, { ok: false, error: '缺少上传内容' });
+      fs.writeFileSync(targetPath, Buffer.from(contentBase64, 'base64'));
+      return send(res, 200, {
+        ok: true,
+        filename: targetName,
+        filePath: `/app/data/uploads/proxy-mappings/${targetName}`,
+        bytes: fs.statSync(targetPath).size,
+      });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection') {
+    try {
+      const body = await parseJsonBody(req);
+      const current = getStoredConfig();
+      const connectionId = String(body.id || '').trim() || generateConnectionId();
+      const existing = getConnectionById(current, connectionId);
+      const privateKeyRaw = String(body.privateKey || '').trim();
+      const privateKey = privateKeyRaw === '[stored]' ? '' : privateKeyRaw;
+      let { config: next, connection } = upsertConnection(current, {
+        ...(existing || {}),
+        id: connectionId,
+        name: String(body.name || '').trim(),
+        sshHost: String(body.sshHost || '').trim(),
+        sshPort: Number(body.sshPort || 22) || 22,
+        sshUser: String(body.sshUser || 'root').trim() || 'root',
+        managementPort: Number(body.managementPort || 0) || 0,
+        boxBase: String(body.boxBase || '').trim(),
+        boxWorkRoot: String(body.boxWorkRoot || '').trim(),
+        privateKey: privateKey || String(existing?.privateKey || '').trim(),
+      });
+      if (body.setActive !== false) next.ssh.activeConnectionId = connection.id;
+      saveAppConfig(next, CONFIG_PATH);
+      return send(res, 200, { ok: true, connectionId: connection.id, config: getPublicConfig() });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  // if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
+  //   try {
+  //     const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+  //     if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+  //     const current = getStoredConfig();
+  //     const existing = getConnectionById(current, connectionId);
+  //     if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
+  //     let privateKey = '';
+  //     if (existing.privateKeyPath && fs.existsSync(existing.privateKeyPath)) privateKey = fs.readFileSync(existing.privateKeyPath, 'utf8');
+  //     else if (existing.privateKey) privateKey = existing.privateKey;
+  //     if (!privateKey) {
+  //       return send(res, 404, { ok: false, error: 'private key not found' });
+  //     }
+  //     return send(res, 200, {
+  //       ok: true,
+  //       connectionId,
+  //       privateKey,
+  //       fingerprint: existing.privateKeyFingerprint || '',
+  //     });
+  //   } catch (err) {
+  //     return send(res, 400, { ok: false, error: err.message });
+  //   }
+  // }
+
+  // if (req.method === 'POST' && u.pathname === '/api/settings/ssh-private-key') {
+  //   try {
+  //     const body = await parseJsonBody(req);
+  //     const connectionId = String(body.connectionId || '').trim();
+  //     const privateKey = String(body.privateKey || '').trim();
+  //     if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+  //     if (!privateKey) return send(res, 400, { ok: false, error: 'missing privateKey' });
+  //     const current = getStoredConfig();
+  //     const existing = getConnectionById(current, connectionId);
+  //     if (!existing) return send(res, 404, { ok: false, error: 'connection not found' });
+  //     const result = writePrivateKey({ connectionId, privateKey });
+  //     const { config: next } = upsertConnection(current, {
+  //       ...existing,
+  //       id: connectionId,
+  //       privateKey,
+  //       privateKeyPath: result.path,
+  //       privateKeyFingerprint: result.fingerprint,
+  //       hasPrivateKey: true,
+  //     });
+  //     saveAppConfig(next, CONFIG_PATH);
+  //     return send(res, 200, {
+  //       ok: true,
+  //       connectionId,
+  //       fingerprint: result.fingerprint,
+  //       config: getPublicConfig(),
+  //     });
+  //   } catch (err) {
+  //     return send(res, 400, { ok: false, error: err.message });
+  //   }
+  // }
+
+  if (req.method === 'POST' && u.pathname === '/api/settings/ssh-connection/delete') {
+    try {
+      const body = await parseJsonBody(req);
+      const connectionId = String(body.connectionId || body.id || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connectionId' });
+      const current = getStoredConfig();
+      const { config: next, deleted } = deleteConnection(current, connectionId);
+      if (!deleted) return send(res, 404, { ok: false, error: 'connection not found' });
+      saveAppConfig(next, CONFIG_PATH);
+      return send(res, 200, { ok: true, connectionId, config: getPublicConfig() });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (req.method === 'GET' && u.pathname === '/api/settings/ssh-private-key') {
+    try {
+      const connectionId = String(u.searchParams.get('id') || '').trim();
+      if (!connectionId) return send(res, 400, { ok: false, error: 'missing connection id' });
+      const cfg = loadAppConfig(CONFIG_PATH);
+      const hit = getConnectionById(cfg, connectionId);
+      if (!hit) return send(res, 404, { ok: false, error: 'connection not found' });
+      if (!String(hit.privateKey || '').trim()) return send(res, 404, { ok: false, error: 'private key not stored' });
+      return send(res, 200, { ok: true, connectionId, privateKey: String(hit.privateKey || '') });
+    } catch (err) {
+      return send(res, 400, { ok: false, error: err.message });
+    }
   }
 
   if (req.method === 'GET' && u.pathname === '/api/slots') {
-    const out = await runCli(['slots', `--config=${CONFIG_PATH}`]);
+    const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+    const args = ['slots', `--config=${CONFIG_PATH}`];
+    if (connectionId) args.push(`--connection-id=${connectionId}`);
+    const out = await runCli(args);
     return send(res, out.ok ? 200 : 500, out);
   }
 
   if (req.method === 'GET' && u.pathname === '/api/list') {
-    const out = await runCli(['list', `--config=${CONFIG_PATH}`]);
+    const connectionId = String(u.searchParams.get('connectionId') || '').trim();
+    const args = ['list', `--config=${CONFIG_PATH}`];
+    if (connectionId) args.push(`--connection-id=${connectionId}`);
+    const out = await runCli(args);
     return send(res, out.ok ? 200 : 500, out);
   }
 
@@ -1415,6 +1861,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(raw || '{}');
         const args = [body.mode, `--config=${CONFIG_PATH}`];
+        if (body.connectionId) args.push(`--connection-id=${body.connectionId}`);
         if (body.slot != null && body.slot !== '') args.push(`--slot=${body.slot}`);
         if (body.targetName) args.push(`--target-name=${body.targetName}`);
         if (body.dryRun) args.push('--dry-run');
@@ -1439,7 +1886,9 @@ const server = http.createServer(async (req, res) => {
         const preferredSlot = String(body.slot || '').trim();
         if (!userId) return send(res, 400, { ok: false, error: 'missing userId' });
         const cfg = readJson(CONFIG_PATH, {});
-        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot);
+        const connectionId = String(body.connectionId || '').trim();
+        const fileLocation = String(body.fileLocation || cfg?.recover?.fileLocation || 'box').trim().toLowerCase() === 'nas' ? 'nas' : 'box';
+        const parsed = await runDetectUserFlow(userId, cfg, preferredSource, preferredTargetName, preferredSlot, connectionId, fileLocation);
         return send(res, 200, { ok: true, parsed, detected: parsed.detected });
       } catch (err) {
         send(res, 400, { ok: false, error: err.message });
@@ -1454,6 +1903,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'precheck', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {
@@ -1469,6 +1919,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'recover-plan', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {
@@ -1484,6 +1935,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const cfg = readJson(CONFIG_PATH, {});
         const normalizedBody = { ...body, mbp: resolveRecoverMbp(cfg, body) };
         const job = createRecoverJob(normalizedBody);
@@ -1549,6 +2001,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(raw || '{}');
+        persistRecoverPayload(body);
         const out = await runCli(buildRecoverArgs(CONFIG_PATH, 'recover-dryrun', body));
         send(res, out.ok ? 200 : 500, out);
       } catch (err) {

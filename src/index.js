@@ -4,6 +4,7 @@ import https from 'node:https';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { applyActiveConnection, ensureConnectionPrivateKeyFile, getActiveConnection } from './config-store.js';
 
 function requestText(target, { method = 'GET', timeout = 5000 } = {}) {
   return new Promise((resolve) => {
@@ -115,7 +116,8 @@ function safeReadJson(file, fallback = null) {
 }
 
 function getConfig(configPath) {
-  return loadJsonIfExists(configPath) || {};
+  const raw = loadJsonIfExists(configPath) || {};
+  return applyActiveConnection(raw);
 }
 
 function getNested(obj, keys, fallback = null) {
@@ -334,54 +336,129 @@ function runLocalCmd(bin, args, options = {}) {
   });
 }
 
+function stripSshNoise(text = '') {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter((x) => x && !/^Warning: Permanently added .* to the list of known hosts\.?$/i.test(x))
+    .join('\n')
+    .trim();
+}
+
+function summarizeCmdError(out = {}, fallback = 'command failed') {
+  return stripSshNoise(out.stderr || '') || String(out.stdout || '').trim() || String(out.error || '').trim() || fallback;
+}
+
 function shellQuote(s = '') {
   return `'${String(s).replace(/'/g, `"'"'`)}'`;
 }
 
 function resolveProxyMappingPath(config = {}) {
-  return String(config?.recover?.proxyMappingFile || path.join(process.cwd(), 'data', 'proxy-mapping.xlsx'));
+  return String(config?.recover?.proxyMappingFile || path.join(process.cwd(), 'data', 'proxy-mapping.json'));
+}
+
+function parseSimpleCsvLine(line = '') {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        cur += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map((x) => String(x || '').trim());
+}
+
+function normalizeProxyRow(row = {}, mappingFile = '') {
+  const result = {
+    id: row.ID ?? row.id ?? null,
+    type: String(row.类型 ?? row.type ?? row.proxyType ?? 2),
+    ip: String(row.IP ?? row.ip ?? row.proxyIp ?? '').trim(),
+    port: String(row.端口 ?? row.port ?? row.proxyPort ?? '').trim(),
+    user: String(row.用户名 ?? row.user ?? row.username ?? '').trim(),
+    password: String(row.密码 ?? row.password ?? row.pass ?? '').trim(),
+    status: row.状态 ?? row.status,
+    remark: row.备注 ?? row.remark ?? '',
+    raw: row,
+    mappingFile,
+  };
+  return result;
 }
 
 async function lookupProxyMappingByIp({ config = {}, ip = '' }) {
   const mappingFile = resolveProxyMappingPath(config);
   if (!ip) return { ok: false, error: 'missing proxy ip', mappingFile };
   if (!fs.existsSync(mappingFile)) return { ok: false, error: `proxy mapping file not found: ${mappingFile}`, mappingFile };
-  const py = [
-    'import json, sys',
-    'from openpyxl import load_workbook',
-    'file_path = sys.argv[1]',
-    'target_ip = str(sys.argv[2]).strip()',
-    'wb = load_workbook(file_path, read_only=True, data_only=True)',
-    'ws = wb[wb.sheetnames[0]]',
-    'headers = [str(v).strip() if v is not None else "" for v in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]',
-    'rows = []',
-    'for row in ws.iter_rows(min_row=2, values_only=True):',
-    '    item = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}',
-    '    if str(item.get("IP", "")).strip() == target_ip:',
-    '        rows.append(item)',
-    'payload = rows[0] if rows else None',
-    'print(json.dumps(payload, ensure_ascii=False, default=str))',
-  ].join('\n');
-  const out = await runLocalCmd('python3', ['-c', py, mappingFile, String(ip)]);
-  if (!out.ok) return { ok: false, error: (out.stderr || out.stdout || 'proxy lookup failed').trim(), mappingFile };
-  const raw = String(out.stdout || '').trim();
+
+  const ext = path.extname(mappingFile).toLowerCase();
   let row = null;
-  try { row = raw ? JSON.parse(raw) : null; } catch (err) {
-    return { ok: false, error: `proxy lookup parse failed: ${err.message}`, mappingFile, raw };
+
+  if (ext === '.json') {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+      const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.rows) ? parsed.rows : Array.isArray(parsed?.data) ? parsed.data : [];
+      row = list.find((item) => String(item?.IP ?? item?.ip ?? item?.proxyIp ?? '').trim() === String(ip).trim()) || null;
+    } catch (err) {
+      return { ok: false, error: `proxy json parse failed: ${err.message}`, mappingFile };
+    }
+  } else if (ext === '.csv') {
+    try {
+      const raw = fs.readFileSync(mappingFile, 'utf8').replace(/^\uFEFF/, '');
+      const lines = raw.split(/\r?\n/).filter((x) => x.trim());
+      if (!lines.length) return { ok: false, error: 'proxy csv file is empty', mappingFile };
+      const headers = parseSimpleCsvLine(lines[0]);
+      const items = lines.slice(1).map((line) => {
+        const cols = parseSimpleCsvLine(line);
+        const item = {};
+        headers.forEach((key, idx) => { item[key] = cols[idx] ?? ''; });
+        return item;
+      });
+      row = items.find((item) => String(item?.IP ?? item?.ip ?? item?.proxyIp ?? '').trim() === String(ip).trim()) || null;
+    } catch (err) {
+      return { ok: false, error: `proxy csv parse failed: ${err.message}`, mappingFile };
+    }
+  } else if (ext === '.xlsx') {
+    const py = [
+      'import json, sys',
+      'from openpyxl import load_workbook',
+      'file_path = sys.argv[1]',
+      'target_ip = str(sys.argv[2]).strip()',
+      'wb = load_workbook(file_path, read_only=True, data_only=True)',
+      'ws = wb[wb.sheetnames[0]]',
+      'headers = [str(v).strip() if v is not None else "" for v in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]',
+      'rows = []',
+      'for row in ws.iter_rows(min_row=2, values_only=True):',
+      '    item = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}',
+      '    if str(item.get("IP", "")).strip() == target_ip:',
+      '        rows.append(item)',
+      'payload = rows[0] if rows else None',
+      'print(json.dumps(payload, ensure_ascii=False, default=str))',
+    ].join('\n');
+    const out = await runLocalCmd('python3', ['-c', py, mappingFile, String(ip)]);
+    if (!out.ok) return { ok: false, error: (out.stderr || out.stdout || 'proxy lookup failed').trim(), mappingFile };
+    const raw = String(out.stdout || '').trim();
+    try { row = raw ? JSON.parse(raw) : null; } catch (err) {
+      return { ok: false, error: `proxy lookup parse failed: ${err.message}`, mappingFile, raw };
+    }
+  } else {
+    return { ok: false, error: `unsupported proxy mapping format: ${ext || '(none)'}`, mappingFile };
   }
+
   if (!row) return { ok: false, error: `proxy mapping not found for ip=${ip}`, mappingFile, proxyIp: ip };
-  const result = {
-    id: row.ID || null,
-    type: String(row.类型 ?? row.type ?? 2),
-    ip: String(row.IP ?? '').trim(),
-    port: String(row.端口 ?? '').trim(),
-    user: String(row.用户名 ?? '').trim(),
-    password: String(row.密码 ?? '').trim(),
-    status: row.状态,
-    remark: row.备注 || '',
-    raw: row,
-    mappingFile,
-  };
+  const result = normalizeProxyRow(row, mappingFile);
   if (!result.ip || !result.port) return { ok: false, error: `proxy mapping row incomplete for ip=${ip}`, mappingFile, row: result };
   return { ok: true, proxy: result };
 }
@@ -409,19 +486,59 @@ async function callInstanceProxyCmdViaBox({ config = {}, instanceApi = '', query
   return { ok: out.ok && status.startsWith('2'), status: Number(status || 0), body: bodyText, json, stdout, stderr: out.stderr || '', url: target };
 }
 
-function pickSshRuntime(config = {}) {
-  const ssh = config?.ssh || {};
+function normalizeProxyAddr(value = '') {
+  const raw = String(value || '').replace(/^socks5:\/\//i, '').trim();
+  if (!raw) return '';
+  const at = raw.lastIndexOf('@');
+  return (at >= 0 ? raw.slice(at + 1) : raw).trim();
+}
+
+function proxyReadbackMatches(state = {}, expected = {}) {
+  const data = state?.json?.data || {};
+  const actualAddr = normalizeProxyAddr(data.addr || '');
+  const expectedAddr = normalizeProxyAddr(`${expected.ip || ''}:${expected.port || ''}`);
+  if (!actualAddr || !expectedAddr) return false;
+  return actualAddr === expectedAddr;
+}
+
+function resolveDetectedProxyIpFromConfig(config = {}, userId = '') {
+  // 恢复任务已与“用户检索”解耦：不再依赖 detectedUsers。
+  // 保留该函数用于兼容旧逻辑/日志输出；恢复链路应使用显式配置或外部映射。
+  const key = String(userId || config?.recover?.userId || '').trim();
+  if (!key) return '';
+  return String(config?.recover?.detected?.proxyIp || '').trim();
+}
+
+function pickSshRuntime(cfg = {}) {
+  const active = getActiveConnection(cfg || {});
+  const ssh = cfg?.ssh || {};
+  const enabled = ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1' || Boolean(active?.privateKeyPath);
   return {
-    enabled: ssh.enabled === true || process.env.MYT_BOX_SSH_ENABLED === '1',
-    host: String(ssh.host || process.env.MYT_BOX_SSH_HOST || 'mylo.gote.top').trim(),
-    port: Number(ssh.port || process.env.MYT_BOX_SSH_PORT || 23191),
-    user: String(ssh.user || process.env.MYT_BOX_SSH_USER || 'root').trim(),
-    key: String(ssh.key || process.env.MYT_BOX_SSH_KEY || '/root/.ssh/MYT1_ed25519').trim(),
+    enabled,
+    host: String(ssh.host || active?.sshHost || process.env.MYT_BOX_SSH_HOST || '').trim(),
+    port: Number(ssh.port || active?.sshPort || process.env.MYT_BOX_SSH_PORT || 22),
+    user: String(ssh.user || active?.sshUser || process.env.MYT_BOX_SSH_USER || 'root').trim(),
+    key: String(ssh.key || active?.privateKeyPath || process.env.MYT_BOX_SSH_KEY || '').trim(),
   };
 }
 
+function ensureActiveSshKeyFile(config = {}) {
+  const active = getActiveConnection(config || {});
+  const pickedId = String(config?.recover?.connectionId || active?.id || '').trim();
+  if (!pickedId) return { ok: true, config };
+
+  // ensureConnectionPrivateKeyFile 会在私钥文件缺失时自动重建，并返回带有最新 privateKeyPath 的 config
+  // 这里必须优先用 recover.connectionId（用户在 UI 选的盒子），否则会误用 activeConnectionId
+  const ensured = ensureConnectionPrivateKeyFile(config, pickedId);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+
+  return { ok: true, config: ensured.config || config };
+}
+
 async function runSshCmd(config = {}, command = '') {
-  const ssh = pickSshRuntime(config);
+  const ensured = ensureActiveSshKeyFile(config);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+  const ssh = pickSshRuntime(ensured.config);
   if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
   return runLocalCmd('ssh', [
     '-i', ssh.key,
@@ -431,6 +548,7 @@ async function runSshCmd(config = {}, command = '') {
     '-o', 'PasswordAuthentication=no',
     '-o', 'KbdInteractiveAuthentication=no',
     '-o', 'ConnectTimeout=8',
+    '-o', 'LogLevel=ERROR',
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',
     `${ssh.user}@${ssh.host}`,
@@ -465,16 +583,17 @@ async function replaceBaselineOverSsh({ config = {}, targetName = '', baseline =
     `TARGET=${shellQuote(userdata)}`,
     'if [ ! -f "' + '$' + 'BASELINE" ]; then echo BASELINE_MISSING; exit 11; fi',
     'if [ ! -f "' + '$' + 'TARGET" ]; then echo TARGET_MISSING; exit 12; fi',
-    'B1=$(sha256sum "' + '$' + 'BASELINE" | cut -d" " -f1)',
-    'T1=$(sha256sum "' + '$' + 'TARGET" | cut -d" " -f1)',
-    'echo BEFORE_BASELINE_SHA=' + '$' + 'B1',
-    'echo BEFORE_TARGET_SHA=' + '$' + 'T1',
-    'if [ "' + '$' + 'B1" = "' + '$' + 'T1" ]; then echo ALREADY_MATCHED=1; exit 0; fi',
+    'BS=$(stat -c%s "' + '$' + 'BASELINE" 2>/dev/null || wc -c < "' + '$' + 'BASELINE")',
+    'TS=$(stat -c%s "' + '$' + 'TARGET" 2>/dev/null || wc -c < "' + '$' + 'TARGET")',
+    'echo BASELINE_SIZE=' + '$' + 'BS',
+    'echo TARGET_SIZE_BEFORE=' + '$' + 'TS',
+    'START_TS=$(date +%s)',
     'cp -f "' + '$' + 'BASELINE" "' + '$' + 'TARGET"',
     'sync',
-    'T2=$(sha256sum "' + '$' + 'TARGET" | cut -d" " -f1)',
-    'echo AFTER_TARGET_SHA=' + '$' + 'T2',
-    'if [ "' + '$' + 'B1" != "' + '$' + 'T2" ]; then echo COPY_VERIFY_FAILED=1; exit 13; fi',
+    'END_TS=$(date +%s)',
+    'TS2=$(stat -c%s "' + '$' + 'TARGET" 2>/dev/null || wc -c < "' + '$' + 'TARGET")',
+    'echo TARGET_SIZE_AFTER=' + '$' + 'TS2',
+    'echo COPY_SECONDS=$((' + '$' + 'END_TS-' + '$' + 'START_TS))',
     'echo COPY_OK=1',
   ].join('; ');
   log(`DEBUG[replaceBaselineOverSsh]: script=${JSON.stringify(script)}`);
@@ -483,7 +602,9 @@ async function replaceBaselineOverSsh({ config = {}, targetName = '', baseline =
 }
 
 async function scpToBox(config = {}, localFile = '', remoteFile = '') {
-  const ssh = pickSshRuntime(config);
+  const ensured = ensureActiveSshKeyFile(config);
+  if (!ensured.ok) return { ok: false, error: ensured.error || 'ssh private key unavailable' };
+  const ssh = pickSshRuntime(ensured.config);
   if (!ssh.enabled) return { ok: false, error: 'ssh disabled' };
   if (!localFile || !fs.existsSync(localFile)) return { ok: false, error: 'local file not found' };
   return runLocalCmd('scp', [
@@ -494,6 +615,7 @@ async function scpToBox(config = {}, localFile = '', remoteFile = '') {
     '-o', 'PasswordAuthentication=no',
     '-o', 'KbdInteractiveAuthentication=no',
     '-o', 'ConnectTimeout=8',
+    '-o', 'LogLevel=ERROR',
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'UserKnownHostsFile=/dev/null',
     localFile,
@@ -532,7 +654,11 @@ function resolveBoxRecoverWorkspace(config = {}, userId = '') {
 async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', log }) {
   const ws = resolveBoxRecoverWorkspace(config, userId);
   const rawMbp = String(mbp || '').trim();
-  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/')) ? ws.sourceMbp : rawMbp;
+  const workRoot = resolveBoxWorkRoot(config);
+  const isEphemeralRemoteMbp = rawMbp.startsWith(`${workRoot}/`) || rawMbp === ws.remoteMbp;
+  const sourceMbp = (!rawMbp || rawMbp.startsWith('/root/') || rawMbp.startsWith('/tmp/') || rawMbp.includes('/workspace/') || isEphemeralRemoteMbp)
+    ? ws.sourceMbp
+    : rawMbp;
   if (log) log(`DEBUG[prepareRemoteMbpArtifacts]: rawMbp=${rawMbp || '-'} -> sourceMbp=${sourceMbp}`);
   const cmd = [
     'set -eu',
@@ -542,7 +668,7 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
     `EXTRACT_ROOT=${shellQuote(ws.extractRoot)}`,
     'if [ ! -f "$SRC" ]; then echo MBP_MISSING=$SRC; exit 21; fi',
     'mkdir -p "$TASK_DIR"',
-    'cp -f "$SRC" "$REMOTE_MBP"',
+    'if [ "$SRC" = "$REMOTE_MBP" ]; then echo SKIP_COPY_SAME_FILE=1; else cp -f "$SRC" "$REMOTE_MBP"; fi',
     'rm -rf "$EXTRACT_ROOT"',
     'mkdir -p "$EXTRACT_ROOT"',
     'tar -xzf "$REMOTE_MBP" -C "$EXTRACT_ROOT"',
@@ -552,7 +678,7 @@ async function prepareRemoteMbpArtifacts({ config = {}, userId = '', mbp = '', l
   ].join('; ');
   const out = await runSshCmd(config, cmd);
   if (!out.ok) {
-    return { ok: false, step: 'prepare-remote-mbp', error: (out.stderr || out.stdout || out.error || 'remote mbp prepare failed').trim(), workspace: ws, sourceMbp };
+    return { ok: false, step: 'prepare-remote-mbp', error: summarizeCmdError(out, 'remote mbp prepare failed'), workspace: ws, sourceMbp };
   }
   return { ok: true, workspace: ws, sourceMbp, detail: (out.stdout || '').trim() };
 }
@@ -808,11 +934,20 @@ function getRecoverIdentityArgs(config = {}) {
   ];
 }
 
+function firstExistingPath(paths = []) {
+  for (const p of paths) {
+    const v = String(p || '').trim();
+    if (v && fs.existsSync(v)) return v;
+  }
+  return String(paths[0] || '').trim();
+}
+
 function resolveChecklistLocalPath(config = {}) {
-  return String(
-    config?.recover?.oldIdentityChecklist
-    || path.resolve(process.cwd(), 'tmp', 'checklists', 'old-identity-checklist-v1.tsv')
-  ).trim();
+  return firstExistingPath([
+    config?.recover?.oldIdentityChecklist,
+    path.resolve(process.cwd(), 'data', 'checklists', 'old-identity-checklist-v1.tsv'),
+    path.resolve(process.cwd(), 'tmp', 'checklists', 'old-identity-checklist-v1.tsv'),
+  ]);
 }
 
 function resolveChecklistRemotePath(config = {}) {
@@ -820,18 +955,35 @@ function resolveChecklistRemotePath(config = {}) {
   return `/tmp/${name}`;
 }
 
-async function ensureRemoteRecoverScripts({ config = {}, log }) {
-  const localBase = path.resolve(process.cwd(), 'tmp', 'live-run');
-  const mapping = [
-    ['slot1_targeted_cleanup.sh', '/tmp/slot1_targeted_cleanup.sh'],
-    ['slot1_inject_user_layer.sh', '/tmp/slot1_inject_user_layer.sh'],
-    ['slot1_precise_postinject_scan.sh', '/tmp/slot1_precise_postinject_scan.sh'],
-    [path.relative(localBase, resolveChecklistLocalPath(config)), resolveChecklistRemotePath(config)],
+function resolveRecoverScriptLocalPath(name = '') {
+  return firstExistingPath([
+    path.resolve(process.cwd(), 'scripts', 'recover', name),
+    path.resolve(process.cwd(), 'tmp', 'live-run', name),
+  ]);
+}
+
+function validateRecoverRuntimeAssets(config = {}) {
+  const required = [
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_targeted_cleanup.sh') },
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_inject_user_layer.sh') },
+    { kind: 'script', file: resolveRecoverScriptLocalPath('slot1_precise_postinject_scan.sh') },
+    { kind: 'checklist', file: resolveChecklistLocalPath(config) },
+    { kind: 'proxy-mapping', file: resolveProxyMappingPath(config) },
   ];
-  for (const [name, remote] of mapping) {
-    const local = path.join(localBase, name);
-    if (!fs.existsSync(local)) {
-      return { ok: false, error: `脚本不存在: ${local}` };
+  const missing = required.filter((x) => !x.file || !fs.existsSync(x.file));
+  return { ok: missing.length === 0, required, missing };
+}
+
+async function ensureRemoteRecoverScripts({ config = {}, log }) {
+  const mapping = [
+    [resolveRecoverScriptLocalPath('slot1_targeted_cleanup.sh'), '/tmp/slot1_targeted_cleanup.sh', 'slot1_targeted_cleanup.sh'],
+    [resolveRecoverScriptLocalPath('slot1_inject_user_layer.sh'), '/tmp/slot1_inject_user_layer.sh', 'slot1_inject_user_layer.sh'],
+    [resolveRecoverScriptLocalPath('slot1_precise_postinject_scan.sh'), '/tmp/slot1_precise_postinject_scan.sh', 'slot1_precise_postinject_scan.sh'],
+    [resolveChecklistLocalPath(config), resolveChecklistRemotePath(config), path.basename(resolveChecklistLocalPath(config) || 'old-identity-checklist-v1.tsv')],
+  ];
+  for (const [local, remote, name] of mapping) {
+    if (!local || !fs.existsSync(local)) {
+      return { ok: false, error: `运行依赖不存在: ${local || name}` };
     }
     log(`同步远端脚本：${name}`);
     const pushed = await scpToBox(config, local, remote);
@@ -1043,9 +1195,9 @@ function printSlotStatus(report) {
 
 function resolveRecoverMbpFromConfig(config, userId, explicitMbp = '') {
   if (explicitMbp) return explicitMbp;
-  const users = Array.isArray(config?.recover?.detectedUsers) ? config.recover.detectedUsers : [];
-  const hit = users.find((x) => String(x?.userId || x?.uid || '') === String(userId || '')) || null;
-  return hit?.workingMbp || hit?.sourceMbp || config?.recover?.detected?.workingMbp || config?.recover?.detected?.recoverMbp || config?.recover?.detected?.sourceMbp || '';
+  const fileLocation = String(config?.recover?.fileLocation || 'box').trim();
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  return path.posix.join(mbpRoot, `${userId}.mbp`);
 }
 
 async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp, userId }) {
@@ -1080,9 +1232,15 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
     const target = discovered.list.find((x) => x.name === targetName);
     if (target) {
       report.target = target;
+      const slots = groupSlots(discovered.list);
+      report.slotRow = slots.find((x) => x.slot === String(target.indexNum ?? '')) || null;
       report.overrides = resolveEndpointOverrides(config, targetName);
       report.checks.push({ item: 'targetExists', ok: true, note: `${target.name} (${target.status})` });
       report.checks.push({ item: 'targetState', ok: ['running', 'exited'].includes(target.status), note: `当前状态 ${target.status}` });
+      if (report.slotRow) {
+        const runningNames = report.slotRow.running.map((x) => x.name).join(', ') || '-';
+        report.checks.push({ item: 'slotState', ok: true, note: `slot=${report.slotRow.slot} running=${report.slotRow.running.length} [${runningNames}]` });
+      }
 
       const baseUrl = new URL(boxBase);
       let resolvedApi = report.overrides.instanceApi || null;
@@ -1111,6 +1269,7 @@ async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp,
   report.summary = summarizeChecks(report.checks);
   report.risks = [];
   if (report.target?.status === 'running') report.risks.push('目标实例当前为 running，后续真正恢复前必须先确认是否允许停机/覆盖');
+  if ((report.slotRow?.running?.length || 0) > 0) report.risks.push(`目标机位当前存在 running 容器 ${report.slotRow.running.map((x) => x.name).join(', ')}，执行恢复前必须先整机位清场`);
   if (!report.overrides?.instanceApi || !report.overrides?.rpaHost || !report.overrides?.rpaPort) report.risks.push('当前实例缺少完整外部端口覆盖配置，后续自动化连通性可能不稳定');
   if (!baseline || !resolvedMbp || !userId) report.risks.push('恢复核心参数未齐，不能进入执行阶段');
 
@@ -1365,7 +1524,12 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
   if (!pre.summary.ok) report.blockers.push('precheck 未通过，不能进入恢复执行');
   report.risks = [...(pre.risks || [])];
 
-  emit({ type: 'job', status: 'started', dryRun, targetName, slot, userId, baseline, mbp });
+  const runtimeAssets = validateRecoverRuntimeAssets(config);
+  if (!runtimeAssets.ok) {
+    report.blockers.push(`recover 运行依赖缺失: ${runtimeAssets.missing.map((x) => x.file || x.kind).join(', ')}`);
+  }
+
+  emit({ type: 'job', status: 'started', dryRun, targetName, slot, userId, baseline, mbp, runtimeAssets });
 
   if (dryRun || report.blockers.length) {
     if (report.blockers.length) report.message = '前置检查未通过，当前仅返回计划';
@@ -1383,16 +1547,53 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
     });
 
     await setStage(plan[1], async () => {
-      log('子任务 2.1：确认目标容器状态');
-      log(`子任务 2.2：准备停机 -> ${targetName}`);
-      if (pre.target?.status === 'running') {
-        log(`目标容器当前为 running，执行停机：${targetName}`);
-        const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: targetName });
-        if (!stopResult.ok) throw new Error(stopResult.error || '停止目标实例失败');
-        log('子任务 2.3：停机完成，目标容器已进入可覆盖阶段');
-      } else {
-        log(`子任务 2.3：目标容器当前不是 running（${pre.target?.status || 'unknown'}），跳过停机`);
+      log('子任务 2.1：确认目标机位状态并执行整机位清场');
+      const discoveredNow = await discoverInstances(boxBase);
+      if (!discoveredNow.ok) {
+        throw new Error(`恢复前整机位清场失败：无法获取容器列表 (${discoveredNow?.result?.error || 'discover failed'})`);
       }
+      const slotsNow = groupSlots(discoveredNow.list || []);
+      let slotRow = null;
+      if (slot) slotRow = slotsNow.find((x) => x.slot === String(slot)) || null;
+      if (!slotRow) {
+        const targetNow = (discoveredNow.list || []).find((x) => x.name === targetName) || null;
+        if (targetNow) slotRow = slotsNow.find((x) => x.slot === String(targetNow.indexNum ?? '')) || null;
+      }
+      if (!slotRow) {
+        throw new Error(`恢复前整机位清场失败：未找到目标机位（slot=${slot || '-'} target=${targetName}）`);
+      }
+
+      const runningInSlot = Array.isArray(slotRow.running) ? slotRow.running.slice() : [];
+      if (!runningInSlot.length) {
+        log(`子任务 2.2：机位 ${slotRow.slot} 当前无 running 容器，直接进入 baseline 覆盖`);
+      } else {
+        log(`子任务 2.2：机位 ${slotRow.slot} 当前有 ${runningInSlot.length} 个 running 容器，先全部停机 -> ${runningInSlot.map((x) => x.name).join(', ')}`);
+        for (const item of runningInSlot) {
+          const stopResult = await postJson(new URL('/android/stop', boxBase).toString(), { name: item.name });
+          if (!stopResult.ok) throw new Error(`停止机位内运行容器失败：${item.name} (${stopResult.error || 'stop failed'})`);
+        }
+        const clearStarted = Date.now();
+        const clearTimeoutMs = 120000;
+        let cleared = false;
+        while (Date.now() - clearStarted <= clearTimeoutMs) {
+          const current = await discoverInstances(boxBase);
+          if (current.ok) {
+            const currentSlots = groupSlots(current.list || []);
+            const currentSlotRow = currentSlots.find((x) => x.slot === String(slotRow.slot)) || null;
+            const currentRunning = currentSlotRow?.running || [];
+            if (!currentRunning.length) {
+              cleared = true;
+              log(`子任务 2.3：机位 ${slotRow.slot} 已清场完成，running=0`);
+              break;
+            }
+          }
+          await sleep(3000);
+        }
+        if (!cleared) {
+          throw new Error(`恢复前整机位清场失败：机位 ${slotRow.slot} 仍有 running 容器`);
+        }
+      }
+
       log('子任务 2.4：确认基座文件与目标镜像进入覆盖准备状态');
       const copyOut = await replaceBaselineOverSsh({ config, targetName, baseline, log });
       if (!copyOut.ok) {
@@ -1400,7 +1601,7 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       }
       const copyLog = `${copyOut.stdout || ''}`.trim();
       if (copyLog) log(`子任务 2.5：baseline 覆盖结果 -> ${copyLog.replace(/\s+/g, ' ').slice(0, 400)}`);
-      return { detail: `baseline 已真实覆盖到 ${copyOut.userdata}` };
+      return { detail: `机位已清场，baseline 已真实覆盖到 ${copyOut.userdata}` };
     });
 
     await setStage(plan[2], async () => {
@@ -1567,7 +1768,7 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
           if (currentTarget.ip) {
             resolvedInstanceApi = resolveInstanceApiFromTarget(currentTarget, boxBase);
           }
-          log(`S5 阶段：实时探测容器状态=${targetStatus}${resolvedInstanceApi ? `，instanceApi=${resolvedInstanceApi}` : ''}`);
+          log(`S5 阶段：实时探测目标对象 name=${currentTarget.name} slot=${currentTarget.indexNum ?? '-'} status=${targetStatus} ip=${currentTarget.ip || '-'} api=${currentTarget.api || '-'}${resolvedInstanceApi ? `，instanceApi=${resolvedInstanceApi}` : ''}`);
         } else {
           log('S5 阶段：实时探测未找到目标容器，沿用前序状态');
         }
@@ -1621,9 +1822,9 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
         }
       }
 
-      const detectedProxyIp = getNested(config, ['recover', 'detected', 'proxyIp'], null) || null;
+      const detectedProxyIp = resolveDetectedProxyIpFromConfig(config, config?.recover?.userId || '');
       if (!detectedProxyIp) {
-        throw new Error('S5 阶段失败：未从 detect/MBP 中解析出外网代理 IP');
+        throw new Error('S5 阶段失败：未从当前用户检测结果中解析出外网代理 IP');
       }
       const proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
       if (!proxyMap.ok) {
@@ -1648,9 +1849,33 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
       if (!writeState.ok) {
         throw new Error(`S5 阶段失败：代理写入调用失败 (http=${writeState.status || '-'} body=${writeState.body || writeState.stderr || '-'})`);
       }
-      const afterState = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
-      if (!afterState.ok) {
-        throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
+      const appliedExpected = { ip: s5.ip, port: s5.port, type: s5.type, user: s5.user };
+      await sleep(1000);
+      let afterState = null;
+      const retryStarted = Date.now();
+      const retryTimeoutMs = 5000;
+      let retryCount = 0;
+      while (Date.now() - retryStarted <= retryTimeoutMs) {
+        retryCount += 1;
+        const current = await callInstanceProxyCmdViaBox({ config, instanceApi: resolvedInstanceApi, query: 'cmd=1' });
+        afterState = current;
+        if (current.ok && proxyReadbackMatches(current, appliedExpected)) {
+          if (retryCount > 1) log(`S5 阶段：写入后回读在第 ${retryCount} 次恢复并匹配`);
+          break;
+        }
+        if (!current.ok) {
+          log(`S5 阶段：写入后回读第 ${retryCount} 次未恢复 (http=${current.status || '-'} body=${current.body || current.stderr || '-'})`);
+        } else {
+          log(`S5 阶段：写入后回读第 ${retryCount} 次未匹配，继续等待 (http=${current.status || '-'} body=${current.body || '-'})`);
+        }
+        if (Date.now() - retryStarted > retryTimeoutMs) break;
+        await sleep(1000);
+      }
+      if (!afterState?.ok) {
+        throw new Error(`S5 阶段失败：代理写入后回读失败 (http=${afterState?.status || '-'} body=${afterState?.body || afterState?.stderr || '-'})`);
+      }
+      if (!proxyReadbackMatches(afterState, appliedExpected)) {
+        throw new Error(`S5 阶段失败：代理写入后回读不匹配 (http=${afterState.status || '-'} body=${afterState.body || afterState.stderr || '-'})`);
       }
       log(`S5 阶段：写入后代理状态 http=${afterState.status || '-'}${afterState.body ? ` body=${afterState.body}` : ''}`);
       return {
@@ -1705,9 +1930,19 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
 
 async function main() {
   const mode = process.argv[2] || 'probe';
-  const configPath = pickArg('config', path.resolve(process.cwd(), 'config.json'));
+  const configPath = pickArg('config', process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json'));
   const config = getConfig(configPath);
-  const boxBase = process.env.MYT_BASE || pickArg('base', config.boxBase || 'http://127.0.0.1:30201');
+  const connectionId = pickArg('connection-id', config?.recover?.connectionId || '');
+  if (connectionId) {
+    if (!config.recover || typeof config.recover !== 'object') config.recover = {};
+    if (!config.ssh || typeof config.ssh !== 'object') config.ssh = {};
+    config.recover.connectionId = connectionId;
+    config.ssh.activeConnectionId = connectionId;
+  }
+  // 注意：只设置 activeConnectionId 不会自动更新 config.boxBase；
+  // 这里显式 applyActiveConnection，确保 boxBase/ssh 参数来自所选 connection。
+  const applied = applyActiveConnection(config);
+  const boxBase = process.env.MYT_BASE || pickArg('base', applied.boxBase || config.boxBase || 'http://127.0.0.1:30201');
   const instanceApi = process.env.MYT_INSTANCE_API || pickArg('instance-api', '');
   const rpaHost = process.env.MYT_RPA_HOST || pickArg('rpa-host', '');
   const rpaPort = Number(process.env.MYT_RPA_PORT || pickArg('rpa-port', '0'));

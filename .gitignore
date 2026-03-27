@@ -11,6 +11,7 @@ config.json
 /release/*.zip
 /release/*.mbp
 /data/*.xlsx
+!/data/proxy-mapping.xlsx
 *.bak-*
 
 # runtime artifacts

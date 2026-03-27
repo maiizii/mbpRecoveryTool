@@ -1,21 +1,74 @@
-async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
 const $ = (id) => document.getElementById(id);
+
+async function j(url, options = {}) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { ok: res.ok, status: res.status, raw: text };
+  }
+  if (data && typeof data === 'object' && !('ok' in data)) data.ok = res.ok;
+  if (data && typeof data === 'object' && !('status' in data)) data.status = res.status;
+  return data;
+}
+
+async function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || '');
+      const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+      resolve(base64 || '');
+    };
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadProxyMappingFile() {
+  const input = $('proxyMappingUpload');
+  const file = input?.files?.[0];
+  if (!file) {
+    showResult('上传代理映射文件', { error: '请先选择 csv/json/xlsx 文件' });
+    return;
+  }
+  const base64 = await readFileAsBase64(file);
+  const out = await j('/api/uploads/proxy-mapping', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, contentBase64: base64 }),
+  });
+  if (!out?.ok) {
+    showResult('上传代理映射文件失败', out);
+    return;
+  }
+  $('proxyMappingFile').value = out.filePath || '';
+  await saveOtherSettings();
+  showResult('代理映射文件已上传并应用', out);
+}
 
 let slotRows = [];
 let currentRecoverJobId = '';
 let recoverPollTimer = null;
 const pageMeta = {
-  machines: { title: '机位管理', desc: '查看机位、实例、运行状态并直接执行切换/启停。' },
+  boxes: { title: '盒子管理', desc: '录入盒子连接信息与私钥，统一管理当前活动盒子。' },
+  machines: { title: '机位管理', desc: '集中查看机位与容器状态，并直接执行启停/切换操作。' },
+  baselines: { title: '基座管理', desc: '管理当前可用的基座列表；后续再演进成按盒子分别管理。' },
   users: { title: '用户检索', desc: '输入 UID，检索 MBP 并提取账号与机参摘要。' },
   recover: { title: '恢复任务', desc: '按顺序选择：用户 → 基座 → 机位 → 容器，并检查是否匹配。' },
-  settings: { title: '参数设置', desc: '配置盒子地址、基座列表等恢复前置参数。' },
+  others: { title: '其他设置', desc: '暂存当前不属于前几个模块的设置项，后续继续收敛。' },
 };
 
-function switchPage(page) {
+function switchPage(page, opts = {}) {
   document.querySelectorAll('.menu-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.page === page));
   document.querySelectorAll('.page').forEach((el) => el.classList.toggle('active', el.dataset.page === page));
   $('pageTitle').textContent = pageMeta[page]?.title || 'MYT 恢复工具';
   $('pageDesc').textContent = pageMeta[page]?.desc || '';
+  if (page === 'boxes' && !opts.keepSshFormState) {
+    fillSshForm(null);
+  }
 }
 
 function summarizeMessage(data) {
@@ -24,7 +77,7 @@ function summarizeMessage(data) {
 
 function showResult(title, data) {
   $('summary').textContent = title + '\n\n' + summarizeMessage(data);
-  $('raw').textContent = JSON.stringify(data, null, 2);
+  $('raw').textContent = data ? JSON.stringify(data, null, 2) : '暂无';
 }
 
 function formatReadableTime(input) {
@@ -82,11 +135,9 @@ async function pollRecoverJob(jobId) {
     if (logEl) logEl.scrollTop = logEl.scrollHeight;
     if (job && !['done', 'failed', 'finished', 'stopped'].includes(job.status)) {
       recoverPollTimer = setTimeout(() => pollRecoverJob(jobId), 1000);
-    } else {
-      if (recoverPollTimer) {
-        clearTimeout(recoverPollTimer);
-        recoverPollTimer = null;
-      }
+    } else if (recoverPollTimer) {
+      clearTimeout(recoverPollTimer);
+      recoverPollTimer = null;
     }
   } catch (err) {
     $('recoverJobLog').textContent = `日志轮询失败: ${err?.message || err}`;
@@ -154,13 +205,45 @@ function setSelectOptions(selectEl, options, preferredValue = '') {
 }
 
 function getDetectedUsers(cfg = {}) {
-  const list = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
+  const list = Array.isArray(cfg?.detect?.detectedUsers) ? cfg.detect.detectedUsers : [];
   return list.filter(x => x && (x.userId || x.uid || x.username));
+}
+
+function getSelectedRecoverConnectionId() {
+  return String(
+    $('machineConnectionSelect')?.value
+    || $('recoverConnectionSelect')?.value
+    || ''
+  ).trim();
+}
+
+function syncRecoverConnectionSelectors(connectionId = '') {
+  const value = String(connectionId || '').trim();
+  if (!value) return;
+  ['machineConnectionSelect', 'recoverConnectionSelect'].forEach((id) => {
+    const el = $(id);
+    if (el) el.value = value;
+  });
 }
 
 function getBaselineOptions(cfg = {}) {
   const list = Array.isArray(cfg?.recover?.baselineOptions) ? cfg.recover.baselineOptions : [];
-  return list.map(x => String(x || '').trim()).filter(Boolean);
+  return list
+    .map((raw) => {
+      const text = String(raw || '').trim();
+      if (!text) return null;
+      const parts = text.split('——').map((x) => String(x || '').trim());
+      const path = parts[0] || '';
+      if (!path) return null;
+      return {
+        raw: text,
+        path,
+        uid: parts[1] || '',
+        username: parts[2] || '',
+        name: parts.slice(3).join('——').trim(),
+      };
+    })
+    .filter(Boolean);
 }
 
 function upsertDetectedUser(cfg = {}, info = {}) {
@@ -179,32 +262,35 @@ function upsertDetectedUser(cfg = {}, info = {}) {
     sourceMbp: info.sourceMbp || '',
     workingMbp: info.workingMbp || '',
     extractRoot: info.extractRoot || '',
+    // 关键：绑定检索时选的盒子，避免 recover 误用别的盒子
+    connectionId: String(info.connectionId || '').trim(),
     detectedAt: new Date().toISOString(),
   });
   return next.slice(0, 50);
 }
 
 function fillDetectedUserSelectors(cfg = {}) {
-  const users = getDetectedUsers(cfg);
-  const preferred = cfg?.recover?.userId || '';
-  setSelectOptions(
-    $('recoverDetectedUser'),
-    users.map((x) => ({
-      value: x.userId || x.uid,
-      label: `${x.userId || x.uid} | ${x.username || '-'} | ${x.nickname || '-'} | ${x.model || '-'} | ${x.proxyIp || '-'}`,
-    })),
-    preferred,
-  );
+  // 恢复任务与“用户检索”已解耦：不再把检索结果塞进恢复下拉。
+  // 这里保留函数占位，避免老调用点报错。
+  return;
+}
+
+function renderBaselineSummary(cfg = {}) {
+  const baselines = getBaselineOptions(cfg);
+  $('baselineSummary').textContent = baselines.length
+    ? baselines.map((x, i) => `${i + 1}. ${x.path} | oldUid=${x.uid || '-'} | oldUsername=${x.username || '-'} | oldName=${x.name || '-'}`).join('\n')
+    : '尚未配置基座';
 }
 
 function fillBaselineSelectors(cfg = {}) {
   const baselines = getBaselineOptions(cfg);
   setSelectOptions(
     $('recoverBaseline'),
-    baselines.map((x) => ({ value: x, label: x })),
+    baselines.map((x) => ({ value: x.path, label: `${x.path} | oldUid=${x.uid || '-'} | ${x.username || '-'} | ${x.name || '-'}` })),
     cfg?.recover?.baseline || '',
   );
-  $('baselineOptions').value = baselines.join('\n');
+  $('baselineOptions').value = baselines.map((x) => x.raw).join('\n');
+  renderBaselineSummary(cfg);
 }
 
 function baselineImageHint(baseline = '') {
@@ -219,45 +305,32 @@ function containerImageValue(item = {}) {
 
 function updateRecoverMatchHint() {
   const baseline = $('recoverBaseline')?.value || '';
-  const target = $('recoverTargetName')?.value || '';
+  const targetName = $('recoverTargetName')?.value || '';
   const slot = $('recoverSlot')?.value || '';
-  const row = slotRows.find(x => String(x.slot) === String(slot));
-  const item = (row?.all || []).find(x => String(x.name) === String(target));
-  const hintEl = $('recoverMatchHint');
-  if (!hintEl) return;
-  if (!baseline || !item) {
-    hintEl.textContent = '匹配提示：请先选择基座和容器';
+  const row = slotRows.find((x) => String(x.slot) === String(slot));
+  const all = [...(row?.running || []), ...(row?.exited || [])];
+  const hit = all.find((x) => String(x.name) === String(targetName));
+  if (!baseline || !targetName || !hit) {
+    $('recoverMatchHint').textContent = '匹配提示：请先选择基座和容器';
     return;
   }
-  const b = baselineImageHint(baseline);
-  const c = containerImageValue(item);
-  const matched = b && c && (baseline.includes(c) || c.includes(b) || b === c);
-  hintEl.textContent = matched
-    ? `匹配提示：✅ 当前容器镜像与基座看起来匹配（baseline=${b || '-'} / container=${c || '-'})`
-    : `匹配提示：⚠️ 当前容器镜像可能与基座不匹配（baseline=${b || '-'} / container=${c || '-'})`;
+  const baselineHint = baselineImageHint(baseline);
+  const image = containerImageValue(hit);
+  const ok = baselineHint && image && image.includes(baselineHint);
+  $('recoverMatchHint').textContent = [
+    `容器镜像: ${image || '-'}`,
+    `基座特征: ${baselineHint || '-'}`,
+    `匹配结论: ${ok ? '看起来匹配' : '未看出明确匹配，建议人工确认'}`,
+  ].join('\n');
 }
 
 function refreshTargetOptions(preferredTarget = '') {
-  const slot = $('recoverSlot')?.value;
-  const baseline = $('recoverBaseline')?.value || '';
-  const baselineHint = baselineImageHint(baseline);
-  const row = slotRows.find(x => String(x.slot) === String(slot));
-  const items = row ? row.all || [] : [];
-  const sorted = [...items].sort((a, b) => {
-    const ai = containerImageValue(a);
-    const bi = containerImageValue(b);
-    const am = baselineHint && ai && (baseline.includes(ai) || ai.includes(baselineHint));
-    const bm = baselineHint && bi && (baseline.includes(bi) || bi.includes(baselineHint));
-    if (am === bm) return String(a.name || '').localeCompare(String(b.name || ''));
-    return am ? -1 : 1;
-  });
+  const slot = $('recoverSlot')?.value || '';
+  const row = slotRows.find((x) => String(x.slot) === String(slot));
+  const items = [...(row?.running || []), ...(row?.exited || [])];
   setSelectOptions(
     $('recoverTargetName'),
-    sorted.map(x => {
-      const img = containerImageValue(x);
-      const matched = baselineHint && img && (baseline.includes(img) || img.includes(baselineHint));
-      return { value: x.name, label: `${matched ? '✅' : '⚠️'} ${x.name} [${x.status}] ${img || ''}`.trim() };
-    }),
+    items.map((x) => ({ value: x.name, label: `${x.name} | ${x.status || '-'} | ${containerImageValue(x) || '-'}` })),
     preferredTarget,
   );
   $('recoverTargetMirror').value = $('recoverTargetName').value || '';
@@ -273,44 +346,359 @@ function fillSlotSelectors(preferredSlot = '', preferredTarget = '') {
   refreshTargetOptions(preferredTarget);
 }
 
+function renderConnectionList(cfg = {}) {
+  const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+  const activeId = cfg?.ssh?.activeConnectionId || '';
+  const boxWrap = $('sshConnectionList');
+  const machineSelect = $('machineConnectionSelect');
+  const userSelect = $('userConnectionSelect');
+  const recoverSelect = $('recoverConnectionSelect');
+  const machineSummary = $('machineConnectionSummary');
+
+  const preferredRecoverConnectionId = cfg?.recover?.connectionId || activeId;
+
+  const options = list.map((x) => ({ value: x.id, label: `${x.name || x.sshHost || x.id} | ${x.sshHost || '-'} | ${x.sshUser || '-'} | ${x.hasPrivateKey ? '已配钥' : '未配钥'}` }));
+
+  if (machineSelect) setSelectOptions(machineSelect, options, preferredRecoverConnectionId);
+  if (userSelect) setSelectOptions(userSelect, options, preferredRecoverConnectionId);
+  if (recoverSelect) setSelectOptions(recoverSelect, options, preferredRecoverConnectionId);
+
+  if (!list.length) {
+    if (boxWrap) boxWrap.textContent = '暂无盒子';
+    if (machineSummary) machineSummary.textContent = '暂无盒子，请先去“盒子管理”录入盒子信息。';
+    return;
+  }
+
+  if (boxWrap) {
+    boxWrap.innerHTML = list.map((x) => `
+      <div class="list-card ${String(x.id) === String(activeId) ? 'active' : ''}">
+        <div class="list-card-title">
+          <span>${x.name || x.sshHost || x.id}</span>
+          <span class="tag">${String(x.id) === String(activeId) ? '当前盒子' : '已保存'}</span>
+        </div>
+        <div class="summary muted topgap">SSH: ${x.sshUser || '-'}@${x.sshHost || '-'}:${x.sshPort || '-'}\n管理端口: ${x.managementPort || '-'}\nboxBase: ${x.boxBase || '-'}\n私钥: ${x.hasPrivateKey ? '已配置' : '未配置'}\n更新时间: ${x.updatedAt || '-'}</div>
+        <div class="actions">
+          <button class="secondary" data-conn-action="edit" data-conn-id="${x.id}">编辑回填</button>
+          <button class="secondary" data-conn-action="activate" data-conn-id="${x.id}">设为当前</button>
+          <button class="danger" data-conn-action="delete" data-conn-id="${x.id}">删除</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  const active = list.find((x) => String(x.id) === String(preferredRecoverConnectionId)) || list.find((x) => String(x.id) === String(activeId)) || list[0];
+  if (machineSummary) {
+    machineSummary.textContent = [
+      `当前盒子: ${active?.name || '-'}`,
+      `SSH: ${active?.sshUser || '-'}@${active?.sshHost || '-'}:${active?.sshPort || '-'}`,
+      `管理端口: ${active?.managementPort || '-'}`,
+      `私钥: ${active?.hasPrivateKey ? '已配置' : '未配置'}`,
+      `boxBase: ${active?.boxBase || '(未设置)'}`,
+      `工作目录: ${active?.boxWorkRoot || '/mmc/myt_recover_work'}`,
+    ].join('\n');
+  }
+}
+
+let sshKeyEditingEnabled = false;
+let currentEditingConnection = null;
+
+function showPrivateKeyEditor(on) {
+  sshKeyEditingEnabled = Boolean(on);
+  const row = $('sshPrivateKeyRow');
+  if (row) row.style.display = sshKeyEditingEnabled ? '' : 'none';
+  if (!sshKeyEditingEnabled && $('sshPrivateKey')) {
+    $('sshPrivateKey').value = '';
+    return;
+  }
+  if (sshKeyEditingEnabled && currentEditingConnection?.id && !$('sshPrivateKey').value.trim()) {
+    j(`/api/settings/ssh-private-key?id=${encodeURIComponent(currentEditingConnection.id)}`)
+      .then((out) => {
+        if (out?.ok && out?.privateKey && $('sshPrivateKey')) $('sshPrivateKey').value = out.privateKey;
+      })
+      .catch((err) => showResult('读取私钥失败', { error: String(err?.message || err) }));
+  }
+}
+
+function fillSshForm(connection = null) {
+  currentEditingConnection = connection || null;
+  $('sshConnId').value = connection?.id || '';
+  $('sshKeyConnectionId').value = connection?.id || '';
+  $('sshConnName').value = connection?.name || '';
+  $('sshHost').value = connection?.sshHost || '';
+  $('sshPort').value = connection?.sshPort || 22;
+  $('sshUser').value = connection?.sshUser || 'root';
+  $('managementPort').value = connection?.managementPort || '';
+  showPrivateKeyEditor(false);
+  const btn = $('saveSshConnection');
+  if (btn) btn.textContent = connection?.id ? '保存盒子' : '新增盒子';
+}
+
+async function activateConnectionById(connectionId, opts = {}) {
+  const cfg = await j('/api/config');
+  const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+  const hit = list.find((x) => String(x.id) === String(connectionId));
+  if (!hit) {
+    showResult('切换盒子失败', { error: '未找到目标盒子' });
+    return;
+  }
+  const out = await j('/api/settings/ssh-connection', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: hit.id,
+      name: hit.name,
+      sshHost: hit.sshHost,
+      sshPort: hit.sshPort,
+      sshUser: hit.sshUser,
+      managementPort: hit.managementPort,
+      boxBase: hit.boxBase,
+      boxWorkRoot: hit.boxWorkRoot,
+      setActive: true,
+    }),
+  });
+  await loadConfig();
+  if (!opts.silent) showResult('当前盒子已切换', out);
+  await refreshSlots();
+}
+
+function bindConnectionListActions() {
+  document.querySelectorAll('button[data-conn-action="edit"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const cfg = await j('/api/config');
+      const list = Array.isArray(cfg?.ssh?.connections) ? cfg.ssh.connections : [];
+      const hit = list.find((x) => String(x.id) === String(btn.dataset.connId));
+      fillSshForm(hit || null);
+      // 默认不展示私钥；需要修改时点击“修改私钥”再拉取回填
+      showPrivateKeyEditor(false);
+      switchPage('boxes', { keepSshFormState: true });
+      showResult('盒子信息已回填表单（私钥默认隐藏）', { ok: true, connectionId: btn.dataset.connId });
+    };
+  });
+  document.querySelectorAll('button[data-conn-action="activate"]').forEach((btn) => {
+    btn.onclick = () => activateConnectionById(btn.dataset.connId);
+  });
+  document.querySelectorAll('button[data-conn-action="delete"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const connectionId = String(btn.dataset.connId || '').trim();
+      if (!connectionId) return;
+      if (!window.confirm('确认删除这个盒子记录吗？')) return;
+      const out = await j('/api/settings/ssh-connection/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ connectionId }),
+      });
+      await loadConfig();
+      showResult('盒子记录已删除', out);
+      const currentFormId = String($('sshConnId')?.value || '').trim();
+      if (currentFormId && currentFormId === connectionId) fillSshForm(null);
+      await refreshSlots();
+    };
+  });
+}
+
+function clearSshForm() {
+  fillSshForm(null);
+  showResult('盒子表单已清空，当前为新增模式', { ok: true });
+}
+
+function renderSshSection(cfg = {}) {
+  const active = cfg?.ssh?.activeConnection || null;
+
+  $('sshSummary').textContent = active ? [
+    `当前盒子ID: ${active.id || '-'}`,
+    `盒子名称: ${active.name || '-'}`,
+    `SSH地址: ${active.sshHost || '-'}`,
+    `SSH端口: ${active.sshPort || '-'}`,
+    `SSH用户: ${active.sshUser || '-'}`,
+    `管理端口: ${active.managementPort || '-'}`,
+    `boxBase: ${active.boxBase || '(未设置)'}`,
+    `工作目录: ${active.boxWorkRoot || '/mmc/myt_recover_work'}`,
+    `私钥: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
+  ].join('\n') : '暂无盒子';
+
+  $('sshKeySummary').textContent = active ? [
+    `当前盒子ID: ${active.id || '-'}`,
+    `私钥状态: ${active.hasPrivateKey ? '已配置' : '未配置'}`,
+    `指纹: ${active.privateKeyFingerprint || '-'}`,
+    `更新时间: ${active.updatedAt || '-'}`,
+  ].join('\n') : '尚未配置私钥';
+
+  renderConnectionList(cfg);
+  bindConnectionListActions();
+}
+
+function getSelectedFileLocation() {
+  const selected = document.querySelector('input[name="fileLocation"]:checked');
+  return selected ? selected.value : 'box';
+}
+
+function getSelectedRecoverFileLocation() {
+  const selected = document.querySelector('input[name="recoverFileLocation"]:checked');
+  return selected ? selected.value : 'box';
+}
+
+function toggleUserConnectionSelect() {
+  const userConnectionSelectWrapper = $('userConnectionSelectWrapper');
+  if (userConnectionSelectWrapper) {
+    userConnectionSelectWrapper.style.display = '';
+  }
+}
+
 async function loadConfig() {
   const cfg = await j('/api/config');
-  $('boxBase').value = cfg.boxBase || '';
+  $('sdkDir').value = cfg.sdkDir || '';
+  $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
+  $('detectUserId').value = cfg.detect?.userId || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
-  $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
+  $('userDetectSummary').textContent = cfg.detect?.detectedSummary || '等待检索用户…';
+  const detectConnectionId = cfg.detect?.connectionId || cfg.ssh?.activeConnectionId || '';
+  const preferredConnectionId = cfg.recover?.connectionId || cfg.ssh?.activeConnectionId || '';
+  if ($('userConnectionSelect')) $('userConnectionSelect').value = detectConnectionId;
+  if ($('recoverConnectionSelect')) $('recoverConnectionSelect').value = preferredConnectionId;
+  if ($('machineConnectionSelect')) $('machineConnectionSelect').value = preferredConnectionId;
+  if (cfg.detect?.fileLocation) {
+    const radio = document.querySelector(`input[name="fileLocation"][value="${cfg.detect.fileLocation}"]`);
+    if (radio) radio.checked = true;
+  }
+  if (cfg.recover?.fileLocation) {
+    const radio = document.querySelector(`input[name="recoverFileLocation"][value="${cfg.recover.fileLocation}"]`);
+    if (radio) radio.checked = true;
+  }
+  toggleUserConnectionSelect();
   $('recoverTargetMirror').value = cfg.recover?.targetName || '';
   fillDetectedUserSelectors(cfg);
   fillBaselineSelectors(cfg);
+  renderSshSection(cfg);
   updateRecoverMatchHint();
   $('configSummary').textContent = [
-    `boxBase: ${cfg.boxBase || '-'}`,
+    `当前 boxBase: ${cfg.boxBase || '-'}`,
+    `SDK目录: ${cfg.sdkDir || '-'}`,
+    `工作目录: ${cfg.recover?.boxWorkRoot || '-'}`,
+    `代理映射文件: ${cfg.recover?.proxyMappingFile || '-'}`,
     `默认目标容器: ${cfg.recover?.targetName || '-'}`,
     `默认机位: ${cfg.recover?.slot || '-'}`,
     `默认基座: ${cfg.recover?.baseline || '-'}`,
     `成功检索用户数: ${getDetectedUsers(cfg).length}`,
     `可用基座数: ${getBaselineOptions(cfg).length}`,
-    `SSH: ${cfg.ssh?.enabled ? '开启' : '关闭'}`,
+    `activeConnectionId: ${cfg.ssh?.activeConnectionId || '-'}`,
+    `运行配置: ${cfg.runtime?.configPath || '-'} | data=${cfg.runtime?.dataDir || '-'}`,
   ].join('\n');
   return cfg;
 }
 
-async function saveConfig() {
-  const cfg = await j('/api/config');
-  cfg.boxBase = $('boxBase').value.trim();
-  cfg.recover = cfg.recover || {};
-  cfg.recover.baselineOptions = $('baselineOptions').value
+async function saveOtherSettings() {
+  const payload = {
+    boxBase: '',
+    sdkDir: $('sdkDir').value.trim(),
+    boxWorkRoot: '',
+    proxyMappingFile: $('proxyMappingFile').value.trim(),
+  };
+  const out = await j('/api/settings/general', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  await loadConfig();
+  showResult('其他设置已保存', out);
+}
+
+async function saveBaselines() {
+  const rows = $('baselineOptions').value
     .split(/\r?\n/)
     .map((x) => x.trim())
     .filter(Boolean);
-  const out = await j('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cfg) });
+  if (!rows.length) {
+    showResult('基座列表未保存', { error: '基座列表现在是空的；为避免误清空，本次已拦截保存。' });
+    return;
+  }
+  const payload = {
+    boxBase: '',
+    sdkDir: $('sdkDir').value.trim(),
+    boxWorkRoot: '',
+    proxyMappingFile: $('proxyMappingFile').value.trim(),
+    baselineOptions: rows,
+  };
+  const out = await j('/api/settings/general', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
   await loadConfig();
-  showResult('配置已保存', out);
+  showResult('基座列表已保存', out);
+}
+
+async function saveSshConnection() {
+  const host = $('sshHost').value.trim();
+  const port = Number($('sshPort').value.trim() || 22);
+  const privateKey = $('sshPrivateKey').value.trim();
+  const name = $('sshConnName').value.trim();
+  const user = $('sshUser').value.trim() || 'root';
+  const managementPort = Number($('managementPort').value.trim() || 0) || 0;
+  const editingId = $('sshConnId').value.trim();
+  const needPrivateKey = !editingId || sshKeyEditingEnabled;
+
+  if (!name || !host || !port || !user || !managementPort || (needPrivateKey && !privateKey)) {
+    showResult('保存盒子失败', { error: needPrivateKey ? '盒子名称、IP、SSH端口、SSH用户、管理端口、私钥都是必填项' : '盒子名称、IP、SSH端口、SSH用户、管理端口都是必填项' });
+    return;
+  }
+
+  const payload = {
+    id: editingId,
+    name,
+    sshHost: host,
+    sshPort: port,
+    sshUser: user,
+    managementPort,
+    boxBase: `http://${host}:${managementPort}`,
+    boxWorkRoot: '/mmc/myt_recover_work',
+    setActive: true,
+  };
+  if (needPrivateKey && privateKey) payload.privateKey = privateKey;
+
+  const out = await j('/api/settings/ssh-connection', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  await loadConfig();
+  fillSshForm(null);
+  showResult(needPrivateKey ? '盒子与私钥已保存' : '盒子信息已保存（私钥未改动）', { ok: true, connectionId: out?.connectionId || payload.id, box: out });
+}
+
+function getSelectedBaselineMeta() {
+  const selected = String($('recoverBaseline')?.value || '').trim();
+  const lines = String($('baselineOptions')?.value || '')
+    .split(/\r?\n/)
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .map((raw) => {
+      const parts = raw.split('——').map((x) => String(x || '').trim());
+      return {
+        raw,
+        path: parts[0] || '',
+        uid: parts[1] || '',
+        username: parts[2] || '',
+        name: parts.slice(3).join('——').trim(),
+      };
+    });
+  return lines.find((x) => x.path === selected) || { path: selected, uid: '', username: '', name: '' };
 }
 
 function getRecoverPayload() {
+  const recoverConnectionId = getSelectedRecoverConnectionId();
+  const baselineMeta = getSelectedBaselineMeta();
+  const fileLocation = getSelectedRecoverFileLocation();
   return {
-    userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
-    baseline: $('recoverBaseline')?.value?.trim?.() || '',
+    userId: $('recoverUserId')?.value?.trim?.() || '',
+    connectionId: recoverConnectionId,
+    fileLocation,
+    baseline: baselineMeta.path || '',
+    baselineIdentity: {
+      uid: baselineMeta.uid || '',
+      username: baselineMeta.username || '',
+      name: baselineMeta.name || '',
+    },
     slot: $('recoverSlot')?.value?.trim?.() || '',
     targetName: $('recoverTargetName')?.value?.trim?.() || '',
     mbp: '',
@@ -334,29 +722,60 @@ async function saveRecoverConfig(extra = {}, opts = {}) {
   return out;
 }
 
+async function saveDetectConfig(extra = {}, opts = {}) {
+  const cfg = await j('/api/config');
+  cfg.detect = {
+    ...(cfg.detect || {}),
+    userId: $('detectUserId')?.value?.trim?.() || cfg.detect?.userId || '',
+    connectionId: $('userConnectionSelect')?.value?.trim?.() || cfg.detect?.connectionId || '',
+    fileLocation: getSelectedFileLocation(),
+    ...extra,
+  };
+  const out = await j('/api/config', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!opts.silent) showResult('用户检索设置已保存', out);
+  await loadConfig();
+  return out;
+}
+
 async function refreshSlots() {
-  const out = await j('/api/slots');
+  const connectionId = getSelectedRecoverConnectionId();
+  const suffix = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : '';
+  const out = await j(`/api/slots${suffix}`);
   slotRows = normalizeSlots(out);
-  $('slots').innerHTML = slotRows.map(slotCard).join('') || '<div class="muted">暂无机位数据。请先到“参数设置”确认 boxBase 是否指向盒子总控接口，而不是单实例接口。</div>';
+  $('slots').innerHTML = slotRows.map(slotCard).join('') || '<div class="muted">暂无机位数据。请先在“盒子管理”里保存 SSH 信息，并确认程序自动推导出的 boxBase 可访问盒子总控接口。</div>';
   const cfg = await j('/api/config');
   fillSlotSelectors(cfg.recover?.slot || '', cfg.recover?.targetName || '');
   bindActions();
-  showResult('机位已刷新', out);
+  showResult('机位已刷新', { ...out, usingConnectionId: connectionId || '' });
 }
 
 async function detectUser() {
+  const fileLocation = getSelectedFileLocation();
+  const connectionId = $('userConnectionSelect')?.value?.trim?.() || '';
+
   const payload = {
-    userId: $('recoverUserId').value.trim(),
+    userId: $('detectUserId').value.trim(),
+    fileLocation,
+    connectionId,
   };
   if (!payload.userId) {
     showResult('用户检索', { error: '请先填写目标 UID' });
+    return;
+  }
+  if (!payload.connectionId) {
+    showResult('用户检索', { error: '请先选择盒子' });
     return;
   }
   const btn = $('detectUser');
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '检索中...';
-  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
+  const sourceHint = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  $('userDetectSummary').textContent = `检索中……\n目标UID: ${payload.userId}\n盒子: ${$('userConnectionSelect')?.selectedOptions?.[0]?.textContent || payload.connectionId}\n文件位置: ${fileLocation === 'nas' ? 'NAS' : '盒子'} (${sourceHint})\n正在自动定位 MBP、复制工作副本并拆包，请稍候`;
   $('raw').textContent = '';
   $('summary').textContent = '用户检索\n\n请求已发出，正在执行中……';
 
@@ -373,7 +792,7 @@ async function detectUser() {
     if (!out.ok) {
       const msg = out?.parsed?.message || out?.error || '检索失败';
       $('userDetectSummary').textContent = `用户检索失败\n${msg}`;
-      await saveRecoverConfig({ userId: payload.userId, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
+      await saveDetectConfig({ userId: payload.userId, connectionId: payload.connectionId, fileLocation, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
     } else if (out.ok && status === 'source_only') {
       const msg = [
         `已定位到 MBP，但基础数据不足：${payload.userId}`,
@@ -381,7 +800,7 @@ async function detectUser() {
         `源MBP: ${info?.sourceMbp || '-'}`,
       ].join('\n');
       $('userDetectSummary').textContent = msg;
-      await saveRecoverConfig({ userId: info?.userId || payload.userId, detectedSummary: msg, detected: info }, { silent: true });
+      await saveDetectConfig({ userId: info?.userId || payload.userId, connectionId: payload.connectionId, fileLocation, detectedSummary: msg, detected: info }, { silent: true });
     } else if (info) {
       const lines = [
         `目标UID: ${info.userId || '-'}`,
@@ -399,11 +818,13 @@ async function detectUser() {
         `GMS机型: ${info.gmsModel || '-'} / ${info.gmsBrand || '-'}`,
         `源MBP: ${info.sourceMbp || '-'}`,
       ];
-      cfg.recover = cfg.recover || {};
-      cfg.recover.userId = info.userId || payload.userId;
-      cfg.recover.detectedSummary = lines.join('\n');
-      cfg.recover.detected = info;
-      cfg.recover.detectedUsers = upsertDetectedUser(cfg, info);
+      cfg.detect = cfg.detect || {};
+      cfg.detect.userId = info.userId || payload.userId;
+      cfg.detect.connectionId = payload.connectionId;
+      cfg.detect.fileLocation = fileLocation;
+      cfg.detect.detectedSummary = lines.join('\n');
+      cfg.detect.detected = { ...info, connectionId: payload.connectionId, fileLocation };
+      cfg.detect.detectedUsers = upsertDetectedUser(cfg, { ...info, connectionId: payload.connectionId, fileLocation });
       await j('/api/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -426,7 +847,7 @@ async function detectUser() {
 async function callRecoverApi(action) {
   const payload = getRecoverPayload();
   if (!payload.userId) {
-    showResult('恢复任务', { error: '请先选择用户' });
+    showResult('恢复任务', { error: '请先填写 UID' });
     return;
   }
   if (!payload.slot) {
@@ -463,7 +884,7 @@ async function doAction(mode, targetName, slot, dryRun) {
   const out = await j('/api/action', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ mode, targetName, slot, dryRun: !!dryRun }),
+    body: JSON.stringify({ mode, targetName, slot, dryRun: !!dryRun, connectionId: getSelectedRecoverConnectionId() }),
   });
   showResult(`操作完成：${mode}`, out);
   await refreshSlots();
@@ -479,14 +900,24 @@ document.querySelectorAll('.menu-btn').forEach((btn) => {
   btn.onclick = () => switchPage(btn.dataset.page);
 });
 
-$('saveConfig').onclick = saveConfig;
+$('saveSshConnection').onclick = saveSshConnection;
+$('clearSshForm').onclick = clearSshForm;
+$('saveBaselines').onclick = saveBaselines;
+$('saveOtherSettings').onclick = saveOtherSettings;
+$('uploadProxyMapping').onclick = uploadProxyMappingFile;
+$('proxyMappingUpload').onchange = () => {
+  const file = $('proxyMappingUpload')?.files?.[0];
+  if (file) showResult('已选择代理映射文件', { ok: true, filename: file.name, size: file.size });
+};
 $('saveRecoverConfig').onclick = () => saveRecoverConfig();
 $('refreshSlots').onclick = refreshSlots;
+$('refreshSlotsMachine').onclick = refreshSlots;
 $('detectUser').onclick = detectUser;
 $('recoverAttachLatest').onclick = attachLatestRecoverJob;
 $('recoverPrecheck').onclick = () => callRecoverApi('precheck');
 $('recoverPlan').onclick = () => callRecoverApi('plan');
 $('recoverDryRun').onclick = () => callRecoverApi('dryrun');
+
 async function copyTextCompat(text) {
   if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
     await navigator.clipboard.writeText(text);
@@ -539,7 +970,47 @@ $('recoverCopyLog').onclick = async () => {
 };
 $('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
-$('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
-$('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 
+$('recoverUserId').onchange = () => { saveRecoverConfig({}, { silent: true }); };
+$('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+document.querySelectorAll('input[name="fileLocation"]').forEach(radio => {
+  radio.onchange = () => {
+    toggleUserConnectionSelect();
+    saveDetectConfig({}, { silent: true });
+  };
+});
+document.querySelectorAll('input[name="recoverFileLocation"]').forEach(radio => {
+  radio.onchange = () => {
+    saveRecoverConfig({}, { silent: true });
+  };
+});
+
+$('machineConnectionSelect').onchange = async () => {
+  const connectionId = $('machineConnectionSelect')?.value || '';
+  if (!connectionId) return;
+  syncRecoverConnectionSelectors(connectionId);
+  // 机位管理页切盒子：不再自动 setActive（避免“跳一下/乱跳”）；
+  // 只保存 recover.connectionId，并按该盒子刷新机位。
+  await saveRecoverConfig({ connectionId }, { silent: true });
+  await refreshSlots();
+};
+$('userConnectionSelect').onchange = async () => {
+  const connectionId = $('userConnectionSelect')?.value || '';
+  if (!connectionId) return;
+  await saveDetectConfig({ connectionId }, { silent: true });
+};
+$('recoverConnectionSelect').onchange = async () => {
+  const connectionId = $('recoverConnectionSelect')?.value || '';
+  if (!connectionId) return;
+  syncRecoverConnectionSelectors(connectionId);
+  await saveRecoverConfig({ connectionId }, { silent: true });
+  await refreshSlots();
+};
+
+$('revealPrivateKey').onclick = async () => {
+  if (!window.confirm('即将显示并允许修改私钥内容，确认继续？')) return;
+  showPrivateKeyEditor(true);
+};
+
+fillSshForm(null);
 loadConfig().then(refreshSlots).then(attachLatestRecoverJob);

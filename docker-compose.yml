@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  recovery-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "23321:23321"
+    environment:
+      # Optional: set NODE_ENV to production for better performance
+      # - NODE_ENV=production
+      # Optional: custom port if 23321 is occupied
+      # - PORT=23321
+
+      # --- Core Paths (Usually no need to change) ---
+      # CONFIG_PATH: Where the main config.json is stored. Mounted to ./data/config.json
+      - CONFIG_PATH=/app/data/config.json
+      # DATA_DIR: Base directory for all runtime data (jobs, uploads, secrets). Mounted to ./data
+      - DATA_DIR=/app/data
+      # JOBS_DIR: Directory for recovery job states and logs. Sub-path of DATA_DIR
+      - JOBS_DIR=/app/data/jobs
+      # UPLOADS_DIR: Directory for uploaded files (e.g., proxy mapping files). Sub-path of DATA_DIR
+      - UPLOADS_DIR=/app/data/uploads
+      # SECRETS_DIR: Directory for sensitive files (e.g., SSH private keys). Sub-path of DATA_DIR
+      - SECRETS_DIR=/app/data/secrets
+
+      # --- Optional: Default SSH connection for CLI (Can be overridden by Web UI config) ---
+      # MYT_BOX_SSH_HOST: Default SSH host for MYT boxes (e.g., 192.168.1.100)
+      # - MYT_BOX_SSH_HOST=
+      # MYT_BOX_SSH_PORT: Default SSH port (e.g., 22)
+      # - MYT_BOX_SSH_PORT=
+      # MYT_BOX_SSH_USER: Default SSH user (e.g., root)
+      # - MYT_BOX_SSH_USER=
+      # MYT_BOX_SSH_KEY: Path to default SSH private key within the container (e.g., /app/data/secrets/ssh/my_key)
+      # - MYT_BOX_SSH_KEY=
+
+      # --- Other Optional CLI Defaults (Can be overridden by Web UI config) ---
+      # MYT_BOX_BASE: Default boxBase endpoint (e.g., http://192.168.2.54:30201)
+      # - MYT_BOX_BASE=
+      # MYT_SDK_DIR: Default SDK directory (e.g., /app/sdk)
+      # - MYT_SDK_DIR=
+      # MYT_BOX_WORK_ROOT: Default box work root (e.g., /mmc/myt_recover_work)
+      # - MYT_BOX_WORK_ROOT=
+      # MYT_PROXY_MAPPING_FILE: Default path to proxy mapping file (e.g., /app/data/proxy-mappings/map.json)
+      # - MYT_PROXY_MAPPING_FILE=
+      # MYT_BASELINE_OPTIONS: Comma-separated list of default baseline images (e.g., /img/base1.img,/img/base2.img)
+      # - MYT_BASELINE_OPTIONS=
+
+    volumes:
+      # Persistent data volume for configuration, jobs, uploads, and secrets
+      - ./data:/app/data
+      # Optional: Mount your SSH private keys directly if you prefer not to use the Web UI upload
+      # - ~/.ssh:/root/.ssh:ro
+
+    restart: unless-stopped
