@@ -205,7 +205,7 @@ function setSelectOptions(selectEl, options, preferredValue = '') {
 }
 
 function getDetectedUsers(cfg = {}) {
-  const list = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
+  const list = Array.isArray(cfg?.detect?.detectedUsers) ? cfg.detect.detectedUsers : [];
   return list.filter(x => x && (x.userId || x.uid || x.username));
 }
 
@@ -213,15 +213,14 @@ function getSelectedRecoverConnectionId() {
   return String(
     $('machineConnectionSelect')?.value
     || $('recoverConnectionSelect')?.value
-    || $('userConnectionSelect')?.value
     || ''
   ).trim();
 }
 
-function syncConnectionSelectors(connectionId = '') {
+function syncRecoverConnectionSelectors(connectionId = '') {
   const value = String(connectionId || '').trim();
   if (!value) return;
-  ['machineConnectionSelect', 'recoverConnectionSelect', 'userConnectionSelect'].forEach((id) => {
+  ['machineConnectionSelect', 'recoverConnectionSelect'].forEach((id) => {
     const el = $(id);
     if (el) el.value = value;
   });
@@ -271,19 +270,9 @@ function upsertDetectedUser(cfg = {}, info = {}) {
 }
 
 function fillDetectedUserSelectors(cfg = {}) {
-  const users = getDetectedUsers(cfg);
-  const preferred = cfg?.recover?.userId || '';
-  const connectionId = getSelectedRecoverConnectionId() || cfg?.recover?.connectionId || '';
-  const filtered = connectionId ? users.filter((x) => String(x.connectionId || '').trim() === String(connectionId).trim()) : users;
-
-  setSelectOptions(
-    $('recoverDetectedUser'),
-    filtered.map((x) => ({
-      value: x.userId || x.uid,
-      label: `${x.userId || x.uid} | ${x.username || '-'} | ${x.nickname || '-'} | ${x.model || '-'} | ${x.proxyIp || '-'}`,
-    })),
-    preferred,
-  );
+  // 恢复任务与“用户检索”已解耦：不再把检索结果塞进恢复下拉。
+  // 这里保留函数占位，避免老调用点报错。
+  return;
 }
 
 function renderBaselineSummary(cfg = {}) {
@@ -543,11 +532,15 @@ function getSelectedFileLocation() {
   return selected ? selected.value : 'box';
 }
 
+function getSelectedRecoverFileLocation() {
+  const selected = document.querySelector('input[name="recoverFileLocation"]:checked');
+  return selected ? selected.value : 'box';
+}
+
 function toggleUserConnectionSelect() {
-  const fileLocation = getSelectedFileLocation();
   const userConnectionSelectWrapper = $('userConnectionSelectWrapper');
   if (userConnectionSelectWrapper) {
-    userConnectionSelectWrapper.style.display = fileLocation === 'box' ? '' : 'none';
+    userConnectionSelectWrapper.style.display = '';
   }
 }
 
@@ -555,14 +548,20 @@ async function loadConfig() {
   const cfg = await j('/api/config');
   $('sdkDir').value = cfg.sdkDir || '';
   $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
+  $('detectUserId').value = cfg.detect?.userId || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
-  $('userDetectSummary').textContent = cfg.recover?.detectedSummary || '等待检索用户…';
+  $('userDetectSummary').textContent = cfg.detect?.detectedSummary || '等待检索用户…';
+  const detectConnectionId = cfg.detect?.connectionId || cfg.ssh?.activeConnectionId || '';
   const preferredConnectionId = cfg.recover?.connectionId || cfg.ssh?.activeConnectionId || '';
-  if ($('userConnectionSelect')) $('userConnectionSelect').value = preferredConnectionId;
+  if ($('userConnectionSelect')) $('userConnectionSelect').value = detectConnectionId;
   if ($('recoverConnectionSelect')) $('recoverConnectionSelect').value = preferredConnectionId;
   if ($('machineConnectionSelect')) $('machineConnectionSelect').value = preferredConnectionId;
+  if (cfg.detect?.fileLocation) {
+    const radio = document.querySelector(`input[name="fileLocation"][value="${cfg.detect.fileLocation}"]`);
+    if (radio) radio.checked = true;
+  }
   if (cfg.recover?.fileLocation) {
-    const radio = document.querySelector(`input[name="fileLocation"][value="${cfg.recover.fileLocation}"]`);
+    const radio = document.querySelector(`input[name="recoverFileLocation"][value="${cfg.recover.fileLocation}"]`);
     if (radio) radio.checked = true;
   }
   toggleUserConnectionSelect();
@@ -689,9 +688,9 @@ function getSelectedBaselineMeta() {
 function getRecoverPayload() {
   const recoverConnectionId = getSelectedRecoverConnectionId();
   const baselineMeta = getSelectedBaselineMeta();
-  const fileLocation = getSelectedFileLocation();
+  const fileLocation = getSelectedRecoverFileLocation();
   return {
-    userId: $('recoverDetectedUser')?.value?.trim?.() || $('recoverUserId')?.value?.trim?.() || '',
+    userId: $('recoverUserId')?.value?.trim?.() || '',
     connectionId: recoverConnectionId,
     fileLocation,
     baseline: baselineMeta.path || '',
@@ -723,6 +722,25 @@ async function saveRecoverConfig(extra = {}, opts = {}) {
   return out;
 }
 
+async function saveDetectConfig(extra = {}, opts = {}) {
+  const cfg = await j('/api/config');
+  cfg.detect = {
+    ...(cfg.detect || {}),
+    userId: $('detectUserId')?.value?.trim?.() || cfg.detect?.userId || '',
+    connectionId: $('userConnectionSelect')?.value?.trim?.() || cfg.detect?.connectionId || '',
+    fileLocation: getSelectedFileLocation(),
+    ...extra,
+  };
+  const out = await j('/api/config', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!opts.silent) showResult('用户检索设置已保存', out);
+  await loadConfig();
+  return out;
+}
+
 async function refreshSlots() {
   const connectionId = getSelectedRecoverConnectionId();
   const suffix = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : '';
@@ -740,7 +758,7 @@ async function detectUser() {
   const connectionId = $('userConnectionSelect')?.value?.trim?.() || '';
 
   const payload = {
-    userId: $('recoverUserId').value.trim(),
+    userId: $('detectUserId').value.trim(),
     fileLocation,
     connectionId,
   };
@@ -774,7 +792,7 @@ async function detectUser() {
     if (!out.ok) {
       const msg = out?.parsed?.message || out?.error || '检索失败';
       $('userDetectSummary').textContent = `用户检索失败\n${msg}`;
-      await saveRecoverConfig({ userId: payload.userId, connectionId: payload.connectionId, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
+      await saveDetectConfig({ userId: payload.userId, connectionId: payload.connectionId, fileLocation, detectedSummary: `用户检索失败\n${msg}`, detected: info || { userId: payload.userId } }, { silent: true });
     } else if (out.ok && status === 'source_only') {
       const msg = [
         `已定位到 MBP，但基础数据不足：${payload.userId}`,
@@ -782,7 +800,7 @@ async function detectUser() {
         `源MBP: ${info?.sourceMbp || '-'}`,
       ].join('\n');
       $('userDetectSummary').textContent = msg;
-      await saveRecoverConfig({ userId: info?.userId || payload.userId, connectionId: payload.connectionId, detectedSummary: msg, detected: info }, { silent: true });
+      await saveDetectConfig({ userId: info?.userId || payload.userId, connectionId: payload.connectionId, fileLocation, detectedSummary: msg, detected: info }, { silent: true });
     } else if (info) {
       const lines = [
         `目标UID: ${info.userId || '-'}`,
@@ -800,12 +818,13 @@ async function detectUser() {
         `GMS机型: ${info.gmsModel || '-'} / ${info.gmsBrand || '-'}`,
         `源MBP: ${info.sourceMbp || '-'}`,
       ];
-      cfg.recover = cfg.recover || {};
-      cfg.recover.userId = info.userId || payload.userId;
-      cfg.recover.connectionId = payload.connectionId;
-      cfg.recover.detectedSummary = lines.join('\n');
-      cfg.recover.detected = { ...info, connectionId: payload.connectionId };
-      cfg.recover.detectedUsers = upsertDetectedUser(cfg, { ...info, connectionId: payload.connectionId });
+      cfg.detect = cfg.detect || {};
+      cfg.detect.userId = info.userId || payload.userId;
+      cfg.detect.connectionId = payload.connectionId;
+      cfg.detect.fileLocation = fileLocation;
+      cfg.detect.detectedSummary = lines.join('\n');
+      cfg.detect.detected = { ...info, connectionId: payload.connectionId, fileLocation };
+      cfg.detect.detectedUsers = upsertDetectedUser(cfg, { ...info, connectionId: payload.connectionId, fileLocation });
       await j('/api/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -828,7 +847,7 @@ async function detectUser() {
 async function callRecoverApi(action) {
   const payload = getRecoverPayload();
   if (!payload.userId) {
-    showResult('恢复任务', { error: '请先选择用户' });
+    showResult('恢复任务', { error: '请先填写 UID' });
     return;
   }
   if (!payload.slot) {
@@ -952,11 +971,16 @@ $('recoverCopyLog').onclick = async () => {
 $('recoverSlot').onchange = () => { refreshTargetOptions(); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 $('recoverTargetName').onchange = () => { $('recoverTargetMirror').value = $('recoverTargetName').value || ''; updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 
-$('recoverDetectedUser').onchange = () => { updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
+$('recoverUserId').onchange = () => { saveRecoverConfig({}, { silent: true }); };
 $('recoverBaseline').onchange = () => { refreshTargetOptions($('recoverTargetName')?.value || ''); updateRecoverMatchHint(); saveRecoverConfig({}, { silent: true }); };
 document.querySelectorAll('input[name="fileLocation"]').forEach(radio => {
   radio.onchange = () => {
     toggleUserConnectionSelect();
+    saveDetectConfig({}, { silent: true });
+  };
+});
+document.querySelectorAll('input[name="recoverFileLocation"]').forEach(radio => {
+  radio.onchange = () => {
     saveRecoverConfig({}, { silent: true });
   };
 });
@@ -964,7 +988,7 @@ document.querySelectorAll('input[name="fileLocation"]').forEach(radio => {
 $('machineConnectionSelect').onchange = async () => {
   const connectionId = $('machineConnectionSelect')?.value || '';
   if (!connectionId) return;
-  syncConnectionSelectors(connectionId);
+  syncRecoverConnectionSelectors(connectionId);
   // 机位管理页切盒子：不再自动 setActive（避免“跳一下/乱跳”）；
   // 只保存 recover.connectionId，并按该盒子刷新机位。
   await saveRecoverConfig({ connectionId }, { silent: true });
@@ -972,16 +996,14 @@ $('machineConnectionSelect').onchange = async () => {
 };
 $('userConnectionSelect').onchange = async () => {
   const connectionId = $('userConnectionSelect')?.value || '';
-  syncConnectionSelectors(connectionId);
-  await saveRecoverConfig({ connectionId }, { silent: true });
+  if (!connectionId) return;
+  await saveDetectConfig({ connectionId }, { silent: true });
 };
 $('recoverConnectionSelect').onchange = async () => {
   const connectionId = $('recoverConnectionSelect')?.value || '';
-  syncConnectionSelectors(connectionId);
+  if (!connectionId) return;
+  syncRecoverConnectionSelectors(connectionId);
   await saveRecoverConfig({ connectionId }, { silent: true });
-  // 盒子变了：用户列表要按盒子过滤，机位/容器也需要来自该盒子
-  const cfg = await j('/api/config');
-  fillDetectedUserSelectors(cfg);
   await refreshSlots();
 };
 

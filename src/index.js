@@ -502,10 +502,11 @@ function proxyReadbackMatches(state = {}, expected = {}) {
 }
 
 function resolveDetectedProxyIpFromConfig(config = {}, userId = '') {
+  // 恢复任务已与“用户检索”解耦：不再依赖 detectedUsers。
+  // 保留该函数用于兼容旧逻辑/日志输出；恢复链路应使用显式配置或外部映射。
   const key = String(userId || config?.recover?.userId || '').trim();
-  const users = Array.isArray(config?.recover?.detectedUsers) ? config.recover.detectedUsers : [];
-  const hit = users.find((x) => String(x?.userId || x?.uid || '').trim() === key) || null;
-  return String(hit?.proxyIp || config?.recover?.detected?.proxyIp || '').trim();
+  if (!key) return '';
+  return String(config?.recover?.detected?.proxyIp || '').trim();
 }
 
 function pickSshRuntime(cfg = {}) {
@@ -1194,9 +1195,9 @@ function printSlotStatus(report) {
 
 function resolveRecoverMbpFromConfig(config, userId, explicitMbp = '') {
   if (explicitMbp) return explicitMbp;
-  const users = Array.isArray(config?.recover?.detectedUsers) ? config.recover.detectedUsers : [];
-  const hit = users.find((x) => String(x?.userId || x?.uid || '') === String(userId || '')) || null;
-  return hit?.workingMbp || hit?.sourceMbp || config?.recover?.detected?.workingMbp || config?.recover?.detected?.recoverMbp || config?.recover?.detected?.sourceMbp || '';
+  const fileLocation = String(config?.recover?.fileLocation || 'box').trim();
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  return path.posix.join(mbpRoot, `${userId}.mbp`);
 }
 
 async function buildPrecheckReport({ boxBase, targetName, config, baseline, mbp, userId }) {

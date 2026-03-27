@@ -1577,9 +1577,10 @@ async function runDetectUserFlow(userId, cfg = {}, preferredSource = '', preferr
 function resolveRecoverMbp(cfg = {}, body = {}) {
   if (body.mbp) return body.mbp;
   const userId = String(body.userId || cfg?.recover?.userId || '').trim();
-  const users = Array.isArray(cfg?.recover?.detectedUsers) ? cfg.recover.detectedUsers : [];
-  const hit = users.find((x) => String(x?.userId || x?.uid || '') === userId) || null;
-  return hit?.workingMbp || hit?.sourceMbp || cfg?.recover?.detected?.workingMbp || cfg?.recover?.detected?.recoverMbp || cfg?.recover?.detected?.sourceMbp || '';
+  if (!userId) return '';
+  const fileLocation = String(body.fileLocation || cfg?.recover?.fileLocation || 'box').trim();
+  const mbpRoot = fileLocation === 'nas' ? '/mnt/myt/mbp' : '/mmc/mbp';
+  return path.posix.join(mbpRoot, `${userId}.mbp`);
 }
 
 function persistRecoverPayload(body = {}) {
@@ -1611,12 +1612,14 @@ function buildRecoverArgs(configPath, mode, body = {}) {
   const baseline = body.baseline || cfg?.recover?.baseline || '';
   const mbp = resolveRecoverMbp(cfg, body);
   const userId = body.userId || cfg?.recover?.userId || '';
+  const fileLocation = body.fileLocation || cfg?.recover?.fileLocation || 'box';
   const connectionId = body.connectionId || cfg?.recover?.connectionId || '';
   if (targetName) args.push(`--target-name=${targetName}`);
   if (slot != null && String(slot).trim() !== '') args.push(`--slot=${String(slot).trim()}`);
   if (baseline) args.push(`--baseline=${baseline}`);
   if (mbp) args.push(`--mbp=${mbp}`);
   if (userId) args.push(`--user-id=${userId}`);
+  if (fileLocation) args.push(`--file-location=${fileLocation}`);
   if (connectionId) args.push(`--connection-id=${connectionId}`);
   return args;
 }

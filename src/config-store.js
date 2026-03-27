@@ -56,6 +56,14 @@ export function createDefaultConfig() {
       userId: '',
       mbp: '',
       proxyMappingFile: '',
+      fileLocation: 'box',
+    },
+    detect: {
+      userId: '',
+      fileLocation: 'box',
+      connectionId: '',
+      detectedSummary: '等待检索用户…',
+      detected: null,
       detectedUsers: [],
     },
   };
@@ -79,10 +87,11 @@ export function mergeConfig(base, incoming) {
   const out = { ...base, ...(incoming || {}) };
   out.ssh = { ...(base.ssh || {}), ...((incoming || {}).ssh || {}) };
   out.recover = { ...(base.recover || {}), ...((incoming || {}).recover || {}) };
+  out.detect = { ...(base.detect || {}), ...((incoming || {}).detect || {}) };
   out.targets = { ...(base.targets || {}), ...((incoming || {}).targets || {}) };
   if (!Array.isArray(out.ssh.connections)) out.ssh.connections = [];
   if (!Array.isArray(out.recover.baselineOptions)) out.recover.baselineOptions = [];
-  if (!Array.isArray(out.recover.detectedUsers)) out.recover.detectedUsers = [];
+  if (!Array.isArray(out.detect.detectedUsers)) out.detect.detectedUsers = [];
   return out;
 }
 

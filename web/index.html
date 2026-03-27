@@ -146,7 +146,7 @@
             <div class="full">
               <label>输入目标 UID</label>
               <div class="row">
-                <input id="recoverUserId" placeholder="例如 7515749848698913838" />
+                <input id="detectUserId" placeholder="例如 7515749848698913838" />
                 <button id="detectUser" class="warn">检索用户</button>
               </div>
               <div class="muted topgap">输入 UID 后，服务端自动定位 MBP、复制工作副本、拆包并提取基础资料。</div>
@@ -167,9 +167,17 @@
               <label>选择盒子</label>
               <select id="recoverConnectionSelect"></select>
             </div>
+            <div class="full">
+              <label>文件位置</label>
+              <div class="row file-location-options">
+                <label><input type="radio" name="recoverFileLocation" value="box" checked> 盒子</label>
+                <label><input type="radio" name="recoverFileLocation" value="nas"> NAS</label>
+              </div>
+              <div class="muted topgap">恢复时将直接从对应目录取 <code>&lt;uid&gt;.mbp</code>：盒子=/mmc/mbp，NAS=/mnt/myt/mbp</div>
+            </div>
             <div>
-              <label>选择用户</label>
-              <select id="recoverDetectedUser"></select>
+              <label>输入 UID</label>
+              <input id="recoverUserId" placeholder="例如 7515749848698913838" />
             </div>
             <div>
               <label>选择基座</label>
