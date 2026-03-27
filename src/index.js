@@ -509,6 +509,84 @@ function resolveDetectedProxyIpFromConfig(config = {}, userId = '') {
   return String(config?.recover?.detected?.proxyIp || '').trim();
 }
 
+function parseFallbackSocks5(input = '') {
+  const raw = String(input || '').trim();
+  if (!raw) return { ok: false, error: 'empty fallback socks5' };
+  const parts = raw.split(':');
+  if (parts.length < 4) return { ok: false, error: 'fallback socks5 format must be 网关:端口:用户名:密码' };
+  const host = String(parts[0] || '').trim();
+  const port = String(parts[1] || '').trim();
+  const user = String(parts[2] || '').trim();
+  const password = String(parts.slice(3).join(':') || '').trim();
+  if (!host || !port) return { ok: false, error: 'fallback socks5 missing host/port' };
+  return {
+    ok: true,
+    proxy: {
+      type: '2',
+      ip: host,
+      port,
+      user,
+      password,
+      mappingFile: 'fallbackSocks5',
+      remark: 'fallback socks5',
+      raw: { source: 'fallbackSocks5', value: raw },
+    },
+  };
+}
+
+async function resolveProxyIpFromPreparedMbp({ config = {}, prepared = null, userId = '', log }) {
+  const ws = prepared?.workspace || resolveBoxRecoverWorkspace(config, userId);
+  const extractRoot = ws?.extractRoot || path.posix.join(resolveBoxWorkRoot(config), String(userId || 'unknown'), 'extract');
+  const script = [
+    'set +e',
+    `EXTRACT_ROOT=${shellQuote(extractRoot)}`,
+    'python3 - <<\'PY\'',
+    'import json, os, pathlib, re',
+    'extract_root = pathlib.Path(os.environ.get("EXTRACT_ROOT", ""))',
+    'hits = []',
+    'if extract_root.exists():',
+    '    for name in ("location.json", "baseCfg.json"):',
+    '        for p in extract_root.rglob(name):',
+    '            hits.append(p)',
+    '            if len(hits) >= 12:',
+    '                break',
+    '        if len(hits) >= 12:',
+    '            break',
+    'def walk(v):',
+    '    if isinstance(v, dict):',
+    '        for vv in v.values(): yield from walk(vv)',
+    '    elif isinstance(v, list):',
+    '        for vv in v: yield from walk(vv)',
+    '    else:',
+    '        yield v',
+    'pat = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")',
+    'found = ""',
+    'hit_file = ""',
+    'for p in hits:',
+    '    try:',
+    '        data = json.loads(p.read_text(errors="ignore"))',
+    '    except Exception:',
+    '        continue',
+    '    for value in walk(data):',
+    '        s = str(value).strip()',
+    '        if pat.match(s) and not s.startswith("10.") and not s.startswith("127.") and not s.startswith("192.168.") and not s.startswith("172."):',
+    '            found = s',
+    '            hit_file = str(p)',
+    '            break',
+    '    if found:',
+    '        break',
+    'print("PROXY_IP=" + found)',
+    'print("PROXY_IP_FILE=" + hit_file)',
+    'PY',
+  ].join('\n');
+  const out = await runSshCmd(config, script);
+  const stdout = String(out.stdout || '');
+  const proxyIp = (stdout.match(/PROXY_IP=([^\n]*)/) || [])[1]?.trim() || '';
+  const hitFile = (stdout.match(/PROXY_IP_FILE=([^\n]*)/) || [])[1]?.trim() || '';
+  if (log) log(`S5 阶段：当前 MBP 现取 proxyIp=${proxyIp || '-'} source=${hitFile || '-'}`);
+  return { ok: out.ok, proxyIp, hitFile, extractRoot, stdout, stderr: out.stderr || '' };
+}
+
 function pickSshRuntime(cfg = {}) {
   const active = getActiveConnection(cfg || {});
   const ssh = cfg?.ssh || {};
@@ -1822,16 +1900,23 @@ async function runRecover({ boxBase, targetName, slot, config, baseline, mbp, us
         }
       }
 
-      const detectedProxyIp = resolveDetectedProxyIpFromConfig(config, config?.recover?.userId || '');
+      const proxyIpState = await resolveProxyIpFromPreparedMbp({ config, prepared: preparedWorkspace, userId, log });
+      const detectedProxyIp = String(proxyIpState?.proxyIp || '').trim();
       if (!detectedProxyIp) {
-        throw new Error('S5 阶段失败：未从当前用户检测结果中解析出外网代理 IP');
+        throw new Error('S5 阶段失败：未能从当前 MBP 中解析出外网IP');
       }
-      const proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
+      let proxyMap = await lookupProxyMappingByIp({ config, ip: detectedProxyIp });
       if (!proxyMap.ok) {
-        throw new Error(`S5 阶段失败：代理映射查找失败 (${proxyMap.error || 'unknown'})`);
+        const fallback = parseFallbackSocks5(config?.recover?.fallbackSocks5 || '');
+        if (fallback.ok) {
+          proxyMap = fallback;
+          log(`S5 阶段：代理映射未命中 ${detectedProxyIp}，回退通用 socks5 -> ${fallback.proxy.ip}:${fallback.proxy.port} user=${fallback.proxy.user || '-'}`);
+        } else {
+          throw new Error(`S5 阶段失败：代理映射查找失败 (${proxyMap.error || 'unknown'})`);
+        }
       }
       const s5 = proxyMap.proxy;
-      log(`S5 阶段：代理映射命中 ${detectedProxyIp} -> ${s5.ip}:${s5.port} user=${s5.user || '-'} type=${s5.type}`);
+      log(`S5 阶段：S5 来源=${s5.mappingFile || 'mapping'}，${detectedProxyIp} -> ${s5.ip}:${s5.port} user=${s5.user || '-'} type=${s5.type}`);
       if (!resolvedInstanceApi) {
         throw new Error('S5 阶段失败：未解析出实例 API 地址');
       }

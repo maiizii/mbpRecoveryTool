@@ -548,6 +548,7 @@ async function loadConfig() {
   const cfg = await j('/api/config');
   $('sdkDir').value = cfg.sdkDir || '';
   $('proxyMappingFile').value = cfg.recover?.proxyMappingFile || '';
+  $('fallbackSocks5').value = cfg.recover?.fallbackSocks5 || '';
   $('detectUserId').value = cfg.detect?.userId || '';
   $('recoverUserId').value = cfg.recover?.userId || '';
   $('userDetectSummary').textContent = cfg.detect?.detectedSummary || '等待检索用户…';
@@ -592,6 +593,7 @@ async function saveOtherSettings() {
     sdkDir: $('sdkDir').value.trim(),
     boxWorkRoot: '',
     proxyMappingFile: $('proxyMappingFile').value.trim(),
+    fallbackSocks5: $('fallbackSocks5').value.trim(),
   };
   const out = await j('/api/settings/general', {
     method: 'POST',

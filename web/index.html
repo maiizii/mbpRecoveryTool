@@ -248,6 +248,11 @@
               <input id="proxyMappingUpload" type="file" accept=".csv,.json,.xlsx" />
               <div class="muted topgap">选择文件后自动上传并写入上面的路径（存到 /app/data/uploads）。</div>
             </div>
+            <div>
+              <label>通用 socks5 代理</label>
+              <input id="fallbackSocks5" placeholder="例如 1.2.3.4:1080:user:pass" />
+              <div class="muted topgap">格式：网关:端口:用户名:密码。若当前 MBP 提取出的外网 IP 在映射文件中找不到，则回退使用这里的代理。</div>
+            </div>
             <div class="full actions">
               <button id="saveOtherSettings">保存其他设置</button>
               <button id="uploadProxyMapping" class="secondary">上传并应用</button>

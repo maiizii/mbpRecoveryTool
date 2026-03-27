@@ -1690,6 +1690,7 @@ const server = http.createServer(async (req, res) => {
           baselineOptions: Array.isArray(body.baselineOptions) ? body.baselineOptions : [],
           baseline: String(body.baseline || '').trim(),
           proxyMappingFile: String(body.proxyMappingFile || '').trim(),
+          fallbackSocks5: String(body.fallbackSocks5 || '').trim(),
         },
       };
       mergeAndSaveConfig(patch);

@@ -56,6 +56,7 @@ export function createDefaultConfig() {
       userId: '',
       mbp: '',
       proxyMappingFile: '',
+      fallbackSocks5: '',
       fileLocation: 'box',
     },
     detect: {
